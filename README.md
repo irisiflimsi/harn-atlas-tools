@@ -164,7 +164,13 @@ depending on the orientation of the linestring.
 
     python geo_rivers.py -t xyz -d user:password@dbname:host:port
 
-The script also takes a -T as option to execute some tests.  It is
-also not done yet, because it still "stops" at lakes.
+The script also takes a -T as option to execute some tests.  Three
+objectives remain:
 
-> Runtime: 5.5 minutes
+* reduce runtime
+
+* have a single axis for area rivers
+
+* correct rivers shorter than width of area rivers
+
+> Runtime: 15.5 minutes
