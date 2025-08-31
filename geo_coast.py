@@ -133,13 +133,6 @@ def main():
         SELECT id, wkb_geometry FROM {args.table}_lines WHERE type LIKE '%COASTLINE%'""")
     print(f"Identifying lines: {cursor.fetchall()[0][0]}")
 
-    # Remove pathological lines
-    print("Remove lines of length 3")
-    cursor.execute(f"""
-        DELETE FROM {args.table}_lines
-        WHERE type LIKE '%COASTLINE%' AND ST_NumPoints(wkb_geometry) < 4
-        OR ST_Length(wkb_geometry) < {EPSL}""")
-
     print("Validate lines")
     cursor.execute(f"""
         SELECT id, wkb_geometry FROM {args.table}_lines WHERE type LIKE '%COASTLINE%'""")
