@@ -10,7 +10,7 @@ EPS0 = 0.005 # must be a bit bigger than EPSB from geo_coast and EPS1
 EPS1 = 0.004 # area rivers grow/shrink to make semi-valid
 
 def make_axis(verbose, table, cursor, merge, bound):
-    """Removes the smallest segments until a single line remains. Update."""
+    """Removes the smallest segments until a single line remains."""
     sql_array = "'" + "'::geometry, '".join(merge) + "'::geometry"
     cursor.execute(f"""
         WITH lines (geo) AS (
@@ -24,85 +24,85 @@ def make_axis(verbose, table, cursor, merge, bound):
         sql_array = "'" + "'::geometry, '".join(axis) + "'::geometry"
         cursor.execute(f"""
             INSERT INTO {table} (id, name, type, wkb_geometry)
-            VALUES (nextval('serial'), 'candidate', 'STREAMS', ST_Union(ARRAY[{sql_array}]))""")
+            VALUES (nextval('serial'), 'candidate', 'STREAMS',
+              ST_Union(ARRAY[{sql_array}]))""")
 
-def handle_lakes(args, cursor, vertex, level, lakes):
-    """Add lakes to river network."""
-    other_vertex = 'end' if vertex == 'start' else 'start'
+def handle_lakes(args, cursor, level):
+    """Find lakes connected to n removed river.Consider as n+1 removed
+    rivers to those lakes.
+    """
     if args.verbose:
-        print(f"Handle lakes level {level} for {vertex}")
-    rm_lakes = []
-    for lake in lakes:
+        print(f"Handle lakes level {level}")
+    cursor.execute(f"""
+        SELECT lake.id, lake.wkb_geometry, river.id, river.wkb_geometry
+        FROM {args.table}_lines AS lake, {args.table}_lines AS river
+        WHERE (lake.style NOT LIKE 'Connected' OR lake.style IS NULL) AND (
+          lake.type LIKE 'COASTLINE/tmp-lake%' OR lake.type LIKE 'Lake%') AND (
+          river.type LIKE 'River/{level}/Mouth:end' AND 
+            ST_Distance(ST_MakePolygon(lake.wkb_geometry),
+              ST_StartPoint(river.wkb_geometry)) < {EPS0} OR
+          river.type LIKE 'River/{level}/Mouth:start' AND 
+            ST_Distance(ST_MakePolygon(lake.wkb_geometry),
+              ST_EndPoint(river.wkb_geometry)) < {EPS0})""")
+    lake_river_list = cursor.fetchall()
+    for lake_river in lake_river_list:
         if args.verbose:
-            print(f"- lake {lake[0]}")
+            print(f"- lake {lake_river[0]} and river {lake_river[2]}")
         cursor.execute(f"""
-            SELECT id FROM {args.table}_lines
-            WHERE type LIKE 'River/{level}/Mouth:{other_vertex}' AND
-              ST_Distance(ST_MakePolygon('{lake[1]}'::geometry),
-                ST_{vertex.capitalize()}Point(wkb_geometry)) < {EPS0}""")
-        lines = cursor.fetchall() # lines with v in lake and ov connected
-        for pts in lines:
-            if args.verbose:
-                print(f"- line {pts[0]} in lake {lake[0]}")
+            UPDATE {args.table}_lines SET style = 'Connected'
+            WHERE id = {lake_river[0]}""")
+        cursor.execute(f"""
+            WITH lines(geo) AS (
+              SELECT (ST_Dump(
+                ST_Difference(ST_MakeValid('{lake_river[3]}'::geometry),
+                  ST_MakeValid(ST_MakePolygon('{lake_river[1]}'::geometry))))).geom)
+            SELECT lines.geo FROM lines ORDER BY ST_Length(lines.geo) DESC
+            LIMIT 1""")
+        line = cursor.fetchall()
+        if len(line) > 0:
             cursor.execute(f"""
-                WITH lines(geo) AS (
-                  SELECT (ST_Dump(
-                    ST_Difference(ST_MakeValid(wkb_geometry),
-                      ST_MakeValid(ST_MakePolygon('{lake[1]}'::geometry))))).geom
-                  FROM {args.table}_lines
-                  WHERE id = {pts[0]})
-                SELECT lines.geo FROM lines ORDER BY ST_Length(lines.geo) DESC
-                LIMIT 1""")
-            line = cursor.fetchall()
-            if len(line) > 0:
-                cursor.execute(f"""
-                    UPDATE {args.table}_lines SET wkb_geometry = '{line[0][0]}'::geometry
-                    WHERE id = {pts[0]}""")
-            # Lake successfully considered
-            if len(pts) > 0:
-                rm_lakes.append(lake)
-        if len(lines) > 0:
-            handle_river(args, cursor, vertex, level + 1, lake[1])
-            handle_river(args, cursor, other_vertex, level + 1, lake[1])
-    # Remove lakes considered
-    for lake in rm_lakes:
-        if lake in lakes:
-            lakes.remove(lake)
+                UPDATE {args.table}_lines SET wkb_geometry = '{line[0][0]}'::geometry
+                WHERE id = {lake_river[2]}""")
+        handle_river(args, cursor, level + 1, lake_river[1])
 
-def handle_river(args, cursor, vertex, level, old):
-    """Creates rivers for all lines. Update."""
-    idx = 0 if vertex == 'start' else -1
+def handle_river(args, cursor, level, old):
+    """Finds and connects rivers n+1 removed to those n removed. Consider
+    lakes.
+    """
     if args.verbose:
-        print(f"Handle outflows level {level} for {vertex}")
+        print(f"Handle outflows level {level}")
     if f"{old}" == "None":
         return 0
     obj = f"'{old}'::geometry"
     cursor.execute(f"""
-        SELECT id, name, type FROM {args.table}_lines
-        WHERE name = 'candidate' AND type NOT LIKE 'River/%' AND
-          ST_Distance({obj},ST_{vertex.capitalize()}Point(wkb_geometry))
-          < {EPS0}""")
+        SELECT id, name, type,
+          ST_Distance({obj},ST_StartPoint(wkb_geometry)),
+          ST_Distance({obj},ST_EndPoint(wkb_geometry))
+        FROM {args.table}_lines
+        WHERE name = 'candidate' AND (type NOT LIKE 'River/%' OR type IS NULL) AND (
+          ST_Distance({obj},ST_StartPoint(wkb_geometry)) < {EPS0} OR
+          ST_Distance({obj},ST_EndPoint(wkb_geometry)) < {EPS0})""")
     lines = cursor.fetchall()
     if args.verbose:
-        print(f"Shift {len(lines)} river {vertex}s")
+        print(f"Shift {len(lines)} rivers' exit nodes")
     for pts in lines:
         if args.verbose:
-            print(f"- line {pts} with {vertex}")
+            print(f"- line {pts[0]}")
+        vertex = 'start' if pts[3] < pts[4] else 'end'
+        idx = 0 if vertex == 'start' else -1
         while True:
             cursor.execute(f"""
-                SELECT ST_Distance('{old}'::geometry,
-                  ST_{vertex.capitalize()}Point(wkb_geometry)),
-                  ST_NPoints(wkb_geometry)
+                SELECT ST_NPoints(wkb_geometry)
                 FROM {args.table}_lines
                 WHERE id = {pts[0]}""")
             line = cursor.fetchall()
             if args.verbose:
-                print(f"- - shorten {pts[0]}: {line[0][1]}")
+                print(f"- - shorten {pts[0]}: {line[0][0]}")
             cursor.execute(f"""
-                SELECT ST_Intersects('{old}'::geometry, wkb_geometry)
+                SELECT ST_Intersects({obj}, wkb_geometry)
                 FROM {args.table}_lines WHERE id = {pts[0]}""")
             intersects = cursor.fetchall()[0]
-            if not intersects[0] or line[0][1] == 2:
+            if not intersects[0] or line[0][0] == 2:
                 break
             cursor.execute(f"""
                 UPDATE {args.table}_lines SET wkb_geometry =
@@ -110,7 +110,7 @@ def handle_river(args, cursor, vertex, level, old):
                 WHERE id = {pts[0]}""")
         cursor.execute(f"""
             SELECT wkb_geometry,
-              ST_ClosestPoint('{old}'::geometry, ST_{vertex.capitalize()}Point(wkb_geometry))
+              ST_ClosestPoint({obj}, ST_{vertex.capitalize()}Point(wkb_geometry))
             FROM {args.table}_lines
             WHERE id = {pts[0]}""")
         pts2 = cursor.fetchall()
@@ -119,9 +119,9 @@ def handle_river(args, cursor, vertex, level, old):
                 INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
                 VALUES (nextval('serial'), '-', 'River/{level}/Mouth:{vertex}',
                   ST_SetPoint(ST_RemoveRepeatedPoints('{pts2[0][0]}'::geometry), {idx},
-                    '{pts2[0][1]}'::geometry))""")
-            cursor.execute(f"""
+                    '{pts2[0][1]}'::geometry));
                 DELETE FROM {args.table}_lines WHERE id = {pts[0]}""")
+    handle_lakes(args, cursor, level)
     return len(lines)
 
 def execute(args, cursor):
@@ -158,14 +158,7 @@ def execute(args, cursor):
     cursor.execute(f"""
         SELECT ST_Union(wkb_geometry) FROM {args.table}_lines WHERE type = '0'""")
     old_term = cursor.fetchall()[0][0]
-    cursor.execute(f"""
-        SELECT id, wkb_geometry FROM {args.table}_lines
-        WHERE type = 'COASTLINE/tmp-lake' OR type LIKE 'Lake%'""")
-    lakes = list(cursor.fetchall())
-    length = handle_river(args, cursor, "start", 0, old_term)
-    length += handle_river(args, cursor, "end", 0, old_term)
-    handle_lakes(args, cursor, "start", 0, lakes)
-    handle_lakes(args, cursor, "end", 0, lakes)
+    length = handle_river(args, cursor, 0, old_term)
 
     # Recurse rivers into rivers
     level = 0
@@ -175,14 +168,12 @@ def execute(args, cursor):
             SELECT ST_Union(wkb_geometry) FROM {args.table}_lines
             WHERE type LIKE 'River/{level-1}/%'""")
         old_term = cursor.fetchall()[0][0]
-        length = handle_river(args, cursor, "start", level, old_term)
-        length += handle_river(args, cursor, "end", level, old_term)
-        handle_lakes(args, cursor, "start", level, lakes)
-        handle_lakes(args, cursor, "end", level, lakes)
+        length = handle_river(args, cursor, level, old_term)
 
     cursor.execute(f"""
         SELECT count(*) FROM {args.table}_lines
-        WHERE type LIKE '%STREAMS%' AND NOT ST_IsClosed(wkb_geometry) AND NOT name = '-'""")
+        WHERE type LIKE '%STREAMS%' AND NOT ST_IsClosed(wkb_geometry) AND
+          NOT (name = '-')""")
 
     print(f"Leave {cursor.fetchall()[0][0]} rivers")
 
@@ -259,7 +250,7 @@ def test_unit1(args, typ, cursor):
           VALUES (nextval('serial'), '3a', 'STREAMS',
             'LINESTRING(10.3000 10.0001, 10.3000 10.0999)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '3b', '{typ}',
+          VALUES (nextval('serial'), '3b', '{typ}3',
             'LINESTRING(10.3000 10.1000, 10.3100 10.1100,
               10.3000 10.1200, 10.2900 10.1100, 10.3000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -269,7 +260,7 @@ def test_unit1(args, typ, cursor):
           VALUES (nextval('serial'), '4a', 'STREAMS',
             'LINESTRING(10.4000 10.0001, 10.4000 10.0999)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '4b', '{typ}',
+          VALUES (nextval('serial'), '4b', '{typ}4',
             'LINESTRING(10.4000 10.1000, 10.4100 10.1100,
               10.4000 10.1200, 10.3900 10.1100, 10.4000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -279,7 +270,7 @@ def test_unit1(args, typ, cursor):
           VALUES (nextval('serial'), '5a', 'STREAMS',
             'LINESTRING(10.5000 10.0999, 10.5000 10.0001)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '5b', '{typ}',
+          VALUES (nextval('serial'), '5b', '{typ}5',
             'LINESTRING(10.5000 10.1000, 10.5100 10.1100,
               10.5000 10.1200, 10.4900 10.1100, 10.5000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -289,7 +280,7 @@ def test_unit1(args, typ, cursor):
           VALUES (nextval('serial'), '6a', 'STREAMS',
             'LINESTRING(10.6000 10.0999, 10.6000 10.0001)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '6b', '{typ}',
+          VALUES (nextval('serial'), '6b', '{typ}6',
             'LINESTRING(10.6000 10.1000, 10.6100 10.1100,
               10.6000 10.1200, 10.5900 10.1100, 10.6000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -300,6 +291,7 @@ def test_unit1(args, typ, cursor):
     execute(args, cursor)
     sel = f"SELECT count(*) FROM {args.table}_lines WHERE "
     num_tests = 0
+
     # 1
     num_tests += 1
     cursor.execute(f"""{sel}
@@ -375,14 +367,14 @@ def test_unit2(args, typ, cursor):
           VALUES (nextval('serial'), '7a', 'STREAMS',
             'LINESTRING(10.7000 10.0001, 10.7000 10.0999)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '7b', '{typ}',
+          VALUES (nextval('serial'), '7b', '{typ}7b',
             'LINESTRING(10.7000 10.1000, 10.7100 10.1100,
               10.7000 10.1200, 10.6900 10.1100, 10.7000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
           VALUES (nextval('serial'), '7c', 'STREAMS',
             'LINESTRING(10.7000 10.1201, 10.7000 10.1999)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '7d', '{typ}',
+          VALUES (nextval('serial'), '7d', '{typ}7d',
             'LINESTRING(10.7000 10.2000, 10.7100 10.2100,
               10.7000 10.2200, 10.6900 10.2100, 10.7000 10.2000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -392,14 +384,14 @@ def test_unit2(args, typ, cursor):
           VALUES (nextval('serial'), '8a', 'STREAMS',
             'LINESTRING(10.8000 10.0001, 10.8000 10.0999)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '8b', '{typ}',
+          VALUES (nextval('serial'), '8b', '{typ}8b',
             'LINESTRING(10.8000 10.1000, 10.8100 10.1100,
               10.8000 10.1200, 10.7900 10.1100, 10.8000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
           VALUES (nextval('serial'), '8c', 'STREAMS',
             'LINESTRING(10.8000 10.1201, 10.8000 10.1999)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '8d', '{typ}',
+          VALUES (nextval('serial'), '8d', '{typ}8d',
             'LINESTRING(10.8000 10.2000, 10.8100 10.2100,
               10.8000 10.2200, 10.7900 10.2100, 10.8000 10.2000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -409,14 +401,14 @@ def test_unit2(args, typ, cursor):
           VALUES (nextval('serial'), '9a', 'STREAMS',
             'LINESTRING(10.9000 10.0001, 10.9000 10.0999)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '9b', '{typ}',
+          VALUES (nextval('serial'), '9b', '{typ}9b',
             'LINESTRING(10.9000 10.1000, 10.9100 10.1100,
               10.9000 10.1200, 10.8900 10.1100, 10.9000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
           VALUES (nextval('serial'), '9c', 'STREAMS',
             'LINESTRING(10.9000 10.1999, 10.9000 10.1201)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '9d', '{typ}',
+          VALUES (nextval('serial'), '9d', '{typ}9d',
             'LINESTRING(10.9000 10.2000, 10.9100 10.2100,
              10.9000 10.2200, 10.8900 10.2100, 10.9000 10.2000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -427,6 +419,7 @@ def test_unit2(args, typ, cursor):
     execute(args, cursor)
     sel = f"SELECT count(*) FROM {args.table}_lines WHERE "
     num_tests = 0
+
     # 7
     num_tests += 1
     cursor.execute(f"""{sel}
@@ -491,7 +484,7 @@ def test_unit3(args, typ, cursor):
           VALUES (nextval('serial'), '10a', 'STREAMS',
             'LINESTRING(11.0000 10.0999, 11.0000 10.0001)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '10b', '{typ}',
+          VALUES (nextval('serial'), '10b', '{typ}10',
             'LINESTRING(11.0000 10.1000, 11.0100 10.1100,
               11.0000 10.1200, 10.9900 10.1100, 11.0000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -504,7 +497,7 @@ def test_unit3(args, typ, cursor):
           VALUES (nextval('serial'), '11a', 'STREAMS',
             'LINESTRING(11.1000 10.0999, 11.1000 10.0001)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-          VALUES (nextval('serial'), '11b', '{typ}',
+          VALUES (nextval('serial'), '11b', '{typ}11',
             'LINESTRING(11.1000 10.1000, 11.1100 10.1100,
               11.1000 10.1200, 11.0900 10.1100, 11.1000 10.1000)'::geometry);
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
@@ -518,6 +511,7 @@ def test_unit3(args, typ, cursor):
     execute(args, cursor)
     sel = f"SELECT count(*) FROM {args.table}_lines WHERE "
     num_tests = 0
+
     # 10
     num_tests += 1
     cursor.execute(f"""{sel}
@@ -550,6 +544,10 @@ def test_sample_area1(args, cursor):
     # Priming test DB
     cursor.execute(f"""
         DELETE FROM {args.table}_lines""")
+    cursor.execute(f"""
+        INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+          VALUES (nextval('serial'), '-', '0',
+            'LINESTRING(10 10, 30 10, 30 20, 10 20, 10 10)'::geometry)""")
     cursor.execute(f"""
         INSERT INTO {args.table}_lines (id, name, type, style, wkb_geometry)
           VALUES (17573, '-', '/STREAMS-LAKES/Melderyn/-', 'fill: #36868d',
@@ -607,6 +605,7 @@ def test_sample_area1(args, cursor):
               -15.8033194 41.1307114, -15.8037544 41.1324189, -15.8046923 41.1341687,
               -15.8045292 41.1347896, -15.8046651 41.1345073, -15.8033194 41.1343803,
               -15.8033194 41.1343803, -15.8033738 41.1343803)'::geometry)""")
+
     # Test object
     execute(args, cursor)
     cursor.execute(f"""
@@ -619,6 +618,10 @@ def test_sample_lake_river(args, cursor):
     # Priming test DB
     cursor.execute(f"""
         DELETE FROM {args.table}_lines""")
+    cursor.execute(f"""
+        INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+          VALUES (nextval('serial'), '-', '0',
+            'LINESTRING(10 10, 30 10, 30 20, 10 20, 10 10)'::geometry)""")
     cursor.execute(f"""
         INSERT INTO {args.table}_lines (id, name, type, style, wkb_geometry)
           VALUES (502241, '-', 'River/0/Mouth:start', '',
@@ -680,6 +683,7 @@ def test_sample_lake_river(args, cursor):
               -15.4119845 40.7962589, -15.4146888 40.7962774, -15.4161296 40.7960105,
               -15.4174997 40.7956395, -15.4187909 40.7951428, -15.4199948 40.7944992,
               -15.4211031 40.7936870, -15.4228855 40.7916490)'::geometry)""")
+
     # Test object
     execute(args, cursor)
     cursor.execute(f"""
@@ -692,6 +696,10 @@ def test_sample_area2(args, cursor):
     # Priming test DB
     cursor.execute(f"""
         DELETE FROM {args.table}_lines""")
+    cursor.execute(f"""
+        INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+          VALUES (nextval('serial'), '-', '0',
+            'LINESTRING(10 10, 30 10, 30 20, 10 20, 10 10)'::geometry)""")
     cursor.execute(f"""
         INSERT INTO {args.table}_lines (id, name, type, style, wkb_geometry)
           VALUES (17609, 'non-closed area river', '/STREAMS-LAKES/Melderyn/-', 'fill: #36868d;',
@@ -720,6 +728,7 @@ def test_sample_area2(args, cursor):
               -16.0481884 40.8781303, -16.0478569 40.8796871, -16.0471603 40.8810139,
               -16.0455237 40.8821296, -16.0444665 40.8824954, -16.0419351 40.8833714,
               -16.0417584 40.8827787)'::geometry)""")
+
     # Test object
     execute(args, cursor)
     cursor.execute(f"""
