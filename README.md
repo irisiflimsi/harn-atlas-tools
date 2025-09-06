@@ -167,10 +167,6 @@ depending on the orientation of the linestring.
 The script also takes a -T as option to execute some tests.  Three
 objectives remain:
 
-* reduce runtime
-
 * have a single axis for area rivers
 
-* correct rivers shorter than width of area rivers
-
-> Runtime: 15.5 minutes
+> Runtime: 6.5 minutes
