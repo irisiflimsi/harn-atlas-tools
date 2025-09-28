@@ -105,7 +105,8 @@ connected to the coastline; Arain & Tontury currently.
 ## Lakes
 
 This determines all lakes by looking at the fill color.  Elevation of
-lakes is not created, calculations are too complex at this point.
+lakes is not created, calculations are too complex at this point.  In
+particular, some have elevation in (currently not recovered) text.
 
     python ~/bin/geo_lakes.py -t xyz -d user:password@dbname:host:port
 
@@ -169,4 +170,4 @@ objectives remain:
 
 * have a single axis for area rivers
 
-> Runtime: 6.5 minutes
+> Runtime: 7.5 minutes

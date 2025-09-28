@@ -6,26 +6,29 @@ import sys
 import argparse
 import psycopg2
 
-EPS0 = 0.005 # must be a bit bigger than EPSB from geo_coast and EPS1
-EPS1 = 0.004 # area rivers grow/shrink to make semi-valid
+EPS0 = 0.0065 # must be a bit bigger than EPSB from geo_coast and EPS1
+EPS1 = 0.006  # area rivers grow/shrink to make semi-valid
 
 def make_axis(verbose, table, cursor, merge, bound):
     """Removes the smallest segments until a single line remains."""
     sql_array = "'" + "'::geometry, '".join(merge) + "'::geometry"
     cursor.execute(f"""
-        WITH lines (geo) AS (
-          SELECT (ST_Dump(ST_Union(ARRAY[{sql_array}]))).geom)
-        SELECT (ST_Dump(ST_LineMerge(ST_Union(geo)))).geom FROM lines
-        WHERE ST_Covers(ST_Buffer('{bound[1]}'::geometry, -{EPS1/50}), geo) """)
+        WITH
+          lines (geo) AS (SELECT (ST_Dump(ST_Union(ARRAY[{sql_array}]))).geom),
+          inlines (geo) AS (
+            SELECT (ST_Dump(ST_LineMerge(ST_Union(geo)))).geom FROM lines
+            WHERE ST_Covers(ST_Buffer('{bound[1]}'::geometry, -{EPS1/50}), geo))
+        SELECT geo FROM inlines WHERE ST_Length(geo) > {EPS1/2}""")
     merge = cursor.fetchall()
     if verbose:
         print(f"- Create axis for {bound[0]} with {len(merge)} medial(s)")
+    if len(merge) > 2:
+        print(f"Look for artifacts near {bound[0]} with {len(merge)} replacement lines")
     for axis in merge:
-        sql_array = "'" + "'::geometry, '".join(axis) + "'::geometry"
         cursor.execute(f"""
             INSERT INTO {table} (id, name, type, wkb_geometry)
             VALUES (nextval('serial'), 'candidate', 'STREAMS',
-              ST_Union(ARRAY[{sql_array}]))""")
+              '{axis[0]}'::geometry)""")
 
 def handle_lakes(args, cursor, level):
     """Find lakes connected to n removed river.Consider as n+1 removed

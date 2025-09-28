@@ -7,8 +7,7 @@ import sys
 import argparse
 import psycopg2
 
-EPSL = 0.004 # distance considered connected
-EPSB = 0.004 # buffer radius to weed out rivers
+EPS = 0.006 # buffer radius to weed out rivers, distance considered connected
 
 def shortest_connect(table, cursor, line_id):
     """
@@ -32,7 +31,7 @@ def shortest_connect(table, cursor, line_id):
             ORDER BY ST_Distance(pt1.p, pt2.p) ASC LIMIT 1) AS connect
           FROM {table} AS main)
           AS connects (add_id, add_type, add_geo, line_geo, connect_geo)
-        WHERE ST_Length(connects.connect_geo) < {EPSL} AND
+        WHERE ST_Length(connects.connect_geo) < {EPS} AND
           (connects.add_type LIKE '%COASTLINE%' OR
             connects.add_type = '0')
         ORDER BY ST_Length(connects.connect_geo) ASC LIMIT 1""")
@@ -63,7 +62,7 @@ def make_valid_polys(table, cursor, merge, line_id):
               SELECT (ST_Dump(ST_LineMerge(ST_Union(ARRAY[{sql_array}])))).geom)
             AS lines (geo) ORDER BY ST_Length(geo) DESC""")
         merge = cursor.fetchall()
-        if merge[-1][1] > EPSL:
+        if merge[-1][1] > EPS:
             break
         merge = [m[0] for m in merge[:-1]]
 
@@ -103,11 +102,35 @@ def make_valid_line(table, cursor, merge, line_id):
         SET wkb_geometry = '{merge[0][0]}'::geometry
         WHERE id = {line_id}""")
 
+def encircle(args, cursor, poly):
+    """Make a valid polygon and extract rivers."""
+    verbosity(args.verbose, f"- {poly[0][0]} ")
+    cursor.execute(f"""
+        SELECT wkb_geometry FROM {args.table}_lines WHERE id = {poly[0][0]}""")
+    with_rivers = cursor.fetchall()[0][0]
+    merge = [p[1] for p in poly]
+    make_valid_line(f"{args.table}_lines", cursor, merge, poly[0][0])
+    cursor.execute(f"""
+        SELECT (ST_Dump(ST_Intersection(
+          ST_Buffer(ST_MakePolygon(wkb_geometry), -{EPS}),
+          ST_Difference(ST_Buffer(ST_MakePolygon(wkb_geometry), {EPS}),
+            ST_MakePolygon('{with_rivers}'::geometry))))).geom
+        FROM {args.table}_lines
+        WHERE id = {poly[0][0]}""")
+    for river in cursor.fetchall():
+        print(f"- new area river")
+        cursor.execute(f"""
+            INSERT INTO {args.table}_lines (id, name, type, style, wkb_geometry)
+            VALUES (
+              nextval('serial'), 'temporary area river',
+              '/STREAMS-LAKE/tmp-river', 'fill: #36868d',
+              ST_ExteriorRing('{river[0]}'::geometry))""")
+
 def main():
     """Main method."""
     parser = argparse.ArgumentParser(
         prog=sys.argv[0],
-        description='Create coast lines from postgis database')
+        description='Create coast) lines from postgis database')
     parser.add_argument(
         '-d', '--database', dest='db', required=True,
         help='db to connect to user:password@dbname:host:port')
@@ -137,6 +160,7 @@ def main():
     cursor.execute(f"""
         SELECT id, wkb_geometry FROM {args.table}_lines WHERE type LIKE '%COASTLINE%'""")
     lines = cursor.fetchall()
+    # Consider self-intersecting lines
     for line in lines:
         make_valid_line(f"{args.table}_lines", cursor, [line[1]], line[0])
 
@@ -170,40 +194,21 @@ def main():
     cursor.execute(f"""
         SELECT id, geo FROM (
           SELECT id, (ST_Dump(ST_Boundary(ST_Union(
-                  ST_Buffer(ST_Buffer(ST_MakePolygon(wkb_geometry), {EPSB}), -2 * {EPSB}),
-                      ST_MakePolygon(wkb_geometry))))).geom
+            ST_Buffer(ST_Buffer(ST_MakePolygon(wkb_geometry), {EPS}), -2 * {EPS}),
+              ST_MakePolygon(wkb_geometry))))).geom
           FROM {args.table}_lines
           WHERE ST_IsClosed(wkb_geometry) AND type LIKE '%COASTLINE%' AND
             ST_Covers(ST_MakePolygon(wkb_geometry), ST_GeomFromText('POINT(-15.3 40.33)')))
         AS lines (id, geo)""")
-    poly = cursor.fetchall()
-    cursor.execute(f"""
-        SELECT wkb_geometry FROM {args.table}_lines WHERE id = {poly[0][0]}""")
-    with_rivers = cursor.fetchall()[0][0]
-    verbosity(args.verbose, f"- {poly[0][0]}")
-    make_valid_line(f"{args.table}_lines", cursor, [p[1] for p in poly], poly[0][0])
-    cursor.execute(f"""
-        SELECT (ST_Dump(ST_Intersection(
-          ST_Buffer(ST_MakePolygon(wkb_geometry), -{EPSB}),
-          ST_Difference(ST_Buffer(ST_MakePolygon(wkb_geometry), {EPSB}),
-            ST_MakePolygon('{with_rivers}'::geometry))))).geom
-        FROM {args.table}_lines
-        WHERE id = {poly[0][0]}""")
-    for river in cursor.fetchall():
-        print(f"- new area river")
-        cursor.execute(f"""
-            INSERT INTO {args.table}_lines (id, name, type, style, wkb_geometry)
-            VALUES (
-              nextval('serial'), 'temporary area river', '/STREAMS-LAKE/tmp-river', 'fill: #36868d',
-              ST_ExteriorRing('{river[0]}'::geometry))""")
+    encircle(args, cursor, cursor.fetchall())
 
     # Lakes
     # Make smaller to "dry" rivers then bigger to create intersection with reality => take boundary
     cursor.execute(f"""
         SELECT id, geo FROM (
           SELECT id, (ST_Dump(ST_Boundary(ST_Intersection(
-                  ST_Buffer(ST_Buffer(ST_MakePolygon(wkb_geometry), -{EPSB}), 2 * {EPSB}),
-                      ST_MakePolygon(wkb_geometry))))).geom
+            ST_Buffer(ST_Buffer(ST_MakePolygon(wkb_geometry), -{EPS}), 2 * {EPS}),
+              ST_MakePolygon(wkb_geometry))))).geom
           FROM {args.table}_lines
           WHERE ST_IsClosed(wkb_geometry) AND type LIKE '%COASTLINE%')
         AS lines (id, geo)
@@ -213,7 +218,18 @@ def main():
     make_valid_polys(f"{args.table}_lines", cursor, [p[1] for p in poly], poly[0][0])
 
     extract_lake(f"{args.table}_lines", cursor, "Arain", 4180, "POINT(-17.7 46.6)")
-    extract_lake(f"{args.table}_lines", cursor, "Tontury", 520, "POINT(-17.8 45)")
+    extract_lake(f"{args.table}_lines", cursor, "Tontury", 520, "POINT(-18.5 43.5)")
+
+    # Special river
+    cursor.execute(f"""
+        UPDATE {args.table}_lines
+        SET name = 'temporary area river', type = '/STREAMS-LAKE/tmp-river'
+        WHERE ST_IsClosed(wkb_geometry) AND
+          ST_NPoints(wkb_geometry) > 3 AND
+          type LIKE '%COASTLINE%' AND
+          ST_Contains(ST_MakePolygon(wkb_geometry), 'POINT(-16.575 41.665)'::geometry)
+        RETURNING id""")
+    print(f"- new area river: {cursor.fetchall()}")
 
     # All (non-distorted) closed is coast
     cursor.execute(f"""
@@ -221,22 +237,24 @@ def main():
         SET type = '0'
         WHERE type LIKE '%COASTLINE%' AND ST_IsClosed(wkb_geometry)""")
 
-    # Everything else must be main Harn.
-    print(f"Remainder is Harn")
+    print(f"Special: Harnic Isle")
     cursor.execute(f"""
         INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-        SELECT
-          nextval('serial'), 'main', '0',
-          ST_ExteriorRing(ST_Buffer(ST_MakePolygon(ST_ExteriorRing(tr.geo)), -{EPSB}))
-        FROM (
-          SELECT tl.geo FROM (
-            SELECT (ST_Dump(ST_Buffer(ST_Union(wkb_geometry), {EPSB}))).geom
-            FROM {args.table}_lines
-            WHERE type LIKE '%COASTLINE%')
-          AS tl (geo)
-          ORDER BY ST_Length(tl.geo)
-          ASC LIMIT 1)
-        AS tr (geo)""")
+        SELECT nextval('serial'), 'main', '0', (
+          SELECT ST_Boundary(tr.geo) FROM (
+            SELECT (ST_Dump(ST_Buffer(ST_MakePolygon(ST_ExteriorRing(tl.geo)), -{EPS}))).geom
+              AS geo
+            FROM (
+              SELECT (ST_Dump(ST_Buffer(ST_Union(wkb_geometry), {EPS}))).geom
+              FROM {args.table}_lines
+              WHERE type LIKE '%COASTLINE%')
+              AS tl (geo)
+            WHERE ST_Contains(ST_MakePolygon(ST_ExteriorRing(tl.geo)), 'POINT(-17 42)'::geometry))
+            AS tr (geo)
+          ORDER BY ST_Perimeter(tr.geo) DESC
+          LIMIT 1)
+        RETURNING id, wkb_geometry""")
+    encircle(args, cursor, cursor.fetchall())
 
     cursor.execute(f"""
         DELETE FROM {args.table}_lines AS tl
