@@ -24,7 +24,7 @@ coastline and benefits vegetation calculation.
 
 The following is the rough procedure to follow:
 
-    python svg2geo.py -i ~/Downloads/HarnAtlas-Clean-01.74.svg -o xyz.json
+    python svg2geo.py -i ~/Downloads/HarnAtlas-Clean-01.91.svg -o xyz.json
 
 This will create points, polygons and lines in separate files, called
 `xyz_<type>.json`, respectively. Because Shape files cannot have
@@ -84,7 +84,7 @@ have no label at this point.  This heuristic improves with the number
 of closed elevation lines.  With Harn being an island this will
 eventually decrease when all lines will be closed.
 
-> Runtime: 4-5 minutes
+> Runtime: 5 minutes
 
 ## Coast line
 
@@ -165,9 +165,6 @@ depending on the orientation of the linestring.
 
     python geo_rivers.py -t xyz -d user:password@dbname:host:port
 
-The script also takes a -T as option to execute some tests.  Three
-objectives remain:
+The script also takes a -T as option to execute some tests.
 
-* have a single axis for area rivers
-
-> Runtime: 7.5 minutes
+> Runtime: 5 minutes
