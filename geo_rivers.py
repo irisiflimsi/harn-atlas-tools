@@ -144,7 +144,9 @@ def execute(args, cursor):
         FROM (
           SELECT id, wkb_geometry FROM {args.table}_lines
           WHERE type LIKE '%STREAMS%' AND 
-            style LIKE '%fill: #36868d%') AS t1 (id,geo)""")
+            style LIKE '%fill: #36868d%' AND
+            ST_NumPoints(wkb_geometry) > 2)
+          AS t1 (id,geo)""")
     rows = cursor.fetchall()
     print(f"Thinning area rivers: {len(rows)}")
     for row in rows:

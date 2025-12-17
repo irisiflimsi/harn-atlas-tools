@@ -151,6 +151,9 @@ def parse_path(typ, elem, out_lines_file, out_point_file):
     while len(path) > 0:
         path = path.strip(' ')
         if path.startswith('M'):
+            if len(line) > 0:
+                out_line(line, typ, name, out_lines_file, elem)
+            line = []
             match = re.match(rf"M{NUM2}", path)
             x_c = float(match.group(1))
             y_c = float(match.group(2))

@@ -13,15 +13,6 @@ the modified dataset.
 
 ## Extraction
 
-For the current export, add
-
-    <g id="uuid-bb7c1ef1-f291-4da3-b491" data-name="Fake">
-      <path d="M7088,4536L6800,4536L6800,2300L9260,2300L9260,3118"/>
-    </g>
-
-just after the COASTLINE group.  This yields a (fake) closed
-coastline and benefits vegetation calculation.
-
 The following is the rough procedure to follow:
 
     python svg2geo.py -i ~/Downloads/HarnAtlas-Clean-01.91.svg -o xyz.json
@@ -57,6 +48,29 @@ You can also use ogr2ogr to convert db data into Shapefiles and
 GeoJson or a lot of other things. A great tool from a great toolset.
 
 > Runtime: 1 minute total
+
+For the current export, execute the following SQL statement on your DB.
+
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50001, '/COASTLINE/tmp', 'LINESTRING(-16.858 45.999,-16.858 47.000,-19.993 48.923)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50002, '/COASTLINE/tmp', 'LINESTRING(-21.348 48.928,-21.342 48.721,-21.452 48.807)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50003, '/COASTLINE/tmp', 'LINESTRING(-21.585 48.770,-22.884 47.523)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50004, '/COASTLINE/tmp', 'LINESTRING(-24.113 47.308,-26.322 45.014)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50005, '/COASTLINE/tmp', 'LINESTRING(-25.299 43.985,-25.634 42.058)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50006, '/COASTLINE/tmp', 'LINESTRING(-24.340 42.057,-19.809 43.999)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50007, '/COASTLINE/tmp', 'LINESTRING(-25.787 45.014,-25.780 45.014)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50008, '/COASTLINE/tmp', 'LINESTRING(-20.000 44.504,-20.000 44.513)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50009, '/COASTLINE/tmp', 'LINESTRING(-20.000 46.233,-20.000 46.245)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50010, '/COASTLINE/tmp', 'LINESTRING(-20.000 46.568,-20.000 46.575)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50011, '/COASTLINE/tmp', 'LINESTRING(-19.702 46.999,-19.694 46.999)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50012, '/COASTLINE/tmp', 'LINESTRING(-19.645 44.000,-19.497 44.000)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50013, '/COASTLINE/tmp', 'LINESTRING(-16.664 44.002,-17.193 43.574,-17.002 42.951)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50014, '/COASTLINE/tmp', 'LINESTRING(-19.497 44.000,-19.470 44.000)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50015, '/COASTLINE/tmp', 'LINESTRING(-18.314 43.000,-18.308 43.000)'::geometry);
+
+to xyz_lines
+
+just after the COASTLINE group.  This yields a (fake) closed
+coastline and benefits vegetation calculation.
 
 ## Elevation
 
@@ -98,9 +112,11 @@ remove rivers by a simple heuristic.  The coasts are not considered by
 `geo_elevation.py` yet. This will also find the big lakes that are
 connected to the coastline; Arain & Tontury currently.
 
+The script also takes a -T as option to execute some tests.
+
 * Uses *EPSL* to bridge shore gaps and *EPSB* to squeeze out rivers.
 
-> Runtime: 1 minute
+> Runtime: 2 minutes
 
 ## Lakes
 
@@ -108,7 +124,7 @@ This determines all lakes by looking at the fill color.  Elevation of
 lakes is not created, calculations are too complex at this point.  In
 particular, some have elevation in (currently not recovered) text.
 
-    python ~/bin/geo_lakes.py -t xyz -d user:password@dbname:host:port
+    python geo_lakes.py -t xyz -d user:password@dbname:host:port
 
 * Ignore pathological lakes smaller than *EPS*.
 
@@ -167,4 +183,4 @@ depending on the orientation of the linestring.
 
 The script also takes a -T as option to execute some tests.
 
-> Runtime: 5 minutes
+> Runtime: 45 minutes
