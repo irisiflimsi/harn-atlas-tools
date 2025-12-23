@@ -7,8 +7,6 @@ import sys
 import argparse
 import psycopg2
 
-EPS = 0.01
-
 def main():
     """Main method."""
     parser = argparse.ArgumentParser(

@@ -6,23 +6,30 @@ import sys
 import argparse
 import psycopg2
 
-EPS0 = 0.0065 # must be a bit bigger than EPSB from geo_coast and EPS1
-EPS1 = 0.006  # area rivers grow/shrink to make semi-valid
+# This is used as a GAP measure to connect non-connected river
+# endpoints or lakes; if the distance is smaller than twice this, then
+# we assume rivers and lakes were meant to be connected although they
+# aren't in the original and the coastal approximation.  Note that
+# previous approximations may separate some water entities more.
+EPS = 0.005 # roughly 0.005 x 100km = 500m
 
-def make_axis(verbose, table, cursor, merge, bound):
-    """Removes the smallest segments until a single line remains."""
-    sql_array = "'" + "'::geometry, '".join(merge) + "'::geometry"
-    cursor.execute(f"""
-        WITH
-          lines (geo) AS (SELECT (ST_Dump(ST_Union(ARRAY[{sql_array}]))).geom),
-          inlines (geo) AS (
-            SELECT (ST_Dump(ST_LineMerge(ST_Union(geo)))).geom FROM lines
-            WHERE ST_Covers(ST_Buffer('{bound[1]}'::geometry, -{EPS1/50}), geo))
-        SELECT geo FROM inlines WHERE ST_Length(geo) > {EPS1/2}""")
-    merge = cursor.fetchall()
+# This is to work around a deficiency in CG_ApproximatedMedialAxis and
+# can be chosen arbitrarily small.
+DEL = 0.0001
+
+def make_axis(verbose, table, cursor, bound):
+    """Removes the protuding segments from the straight skeleton."""
     if verbose:
-        print(f"- Create axis for {bound[0]} with {len(merge)} medial(s)")
-    if len(merge) > 2:
+        print(f"- Create axis for {bound[0]}")
+    cursor.execute(f"""
+        SELECT geo FROM (
+          SELECT (ST_Dump(ST_LineMerge(CG_ApproximateMedialAxis(ST_Buffer(geo, -{DEL}))))).geom AS geo FROM (
+            SELECT geo FROM (
+              SELECT (ST_Dump(ST_CollectionExtract(ST_Polygonize(ST_Node('{bound[1]}'::geometry)), 3))).geom AS geo)
+            ORDER BY ST_Perimeter(geo) DESC LIMIT 1))
+        WHERE ST_Length(geo) > {EPS}""")
+    merge = cursor.fetchall()
+    if len(merge) > 1:
         print(f"Look for artifacts near {bound[0]} with {len(merge)} replacement lines")
     for axis in merge:
         cursor.execute(f"""
@@ -31,7 +38,7 @@ def make_axis(verbose, table, cursor, merge, bound):
               '{axis[0]}'::geometry)""")
 
 def handle_lakes(args, cursor, level):
-    """Find lakes connected to n removed river.Consider as n+1 removed
+    """Find lakes connected to n-removed river.  Consider as n+1-removed
     rivers to those lakes.
     """
     if args.verbose:
@@ -43,10 +50,10 @@ def handle_lakes(args, cursor, level):
           lake.type LIKE 'COASTLINE/tmp-lake%' OR lake.type LIKE 'Lake%') AND (
           river.type LIKE 'River/{level}/Mouth:end' AND 
             ST_Distance(ST_MakePolygon(lake.wkb_geometry),
-              ST_StartPoint(river.wkb_geometry)) < {EPS0} OR
+              ST_StartPoint(river.wkb_geometry)) < 2*{EPS} OR
           river.type LIKE 'River/{level}/Mouth:start' AND 
             ST_Distance(ST_MakePolygon(lake.wkb_geometry),
-              ST_EndPoint(river.wkb_geometry)) < {EPS0})""")
+              ST_EndPoint(river.wkb_geometry)) < 2*{EPS})""")
     lake_river_list = cursor.fetchall()
     for lake_river in lake_river_list:
         if args.verbose:
@@ -69,7 +76,7 @@ def handle_lakes(args, cursor, level):
         handle_river(args, cursor, level + 1, lake_river[1])
 
 def handle_river(args, cursor, level, old):
-    """Finds and connects rivers n+1 removed to those n removed. Consider
+    """Finds and connects rivers n+1-removed to those n removed. Consider
     lakes.
     """
     if args.verbose:
@@ -83,8 +90,8 @@ def handle_river(args, cursor, level, old):
           ST_Distance({obj},ST_EndPoint(wkb_geometry))
         FROM {args.table}_lines
         WHERE name = 'candidate' AND (type NOT LIKE 'River/%' OR type IS NULL) AND (
-          ST_Distance({obj},ST_StartPoint(wkb_geometry)) < {EPS0} OR
-          ST_Distance({obj},ST_EndPoint(wkb_geometry)) < {EPS0})""")
+          ST_Distance({obj},ST_StartPoint(wkb_geometry)) < 2*{EPS} OR
+          ST_Distance({obj},ST_EndPoint(wkb_geometry)) < 2*{EPS})""")
     lines = cursor.fetchall()
     if args.verbose:
         print(f"Shift {len(lines)} rivers' exit nodes")
@@ -137,23 +144,22 @@ def execute(args, cursor):
     print(f"Found {cursor.fetchall()[0][0]} rivers")
 
     # These are all extended rivers
-    # (Buffer because there are strange duplicates)
     cursor.execute(f"""
-        SELECT t1.id, ST_Buffer(ST_MakeValid(
-          ST_MakePolygon(ST_AddPoint(t1.geo, ST_StartPoint(t1.geo)))), {EPS1}/100)
+        SELECT t1.id, 
+          ST_ExteriorRing(ST_MakePolygon(
+            ST_LineMerge(ST_AddPoint(t1.geo, ST_StartPoint(t1.geo))))
+          ) AS geo
         FROM (
           SELECT id, wkb_geometry FROM {args.table}_lines
           WHERE type LIKE '%STREAMS%' AND 
             style LIKE '%fill: #36868d%' AND
             ST_NumPoints(wkb_geometry) > 2)
-          AS t1 (id,geo)""")
+          AS t1 (id, geo)
+        WHERE NOT ST_IsEmpty(geo)""")
     rows = cursor.fetchall()
     print(f"Thinning area rivers: {len(rows)}")
     for row in rows:
-        cursor.execute(f"""
-            SELECT CG_ApproximateMedialAxis('{row[1]}'::geometry)""")
-        axis = cursor.fetchall()
-        make_axis(args.verbose, f"{args.table}_lines", cursor, [l[0] for l in axis], row)
+        make_axis(args.verbose, f"{args.table}_lines", cursor, row)
 
     cursor.execute(f"""
         UPDATE {args.table}_lines SET name = 'candidate'
@@ -175,6 +181,9 @@ def execute(args, cursor):
         old_term = cursor.fetchall()[0][0]
         length = handle_river(args, cursor, level, old_term)
 
+    # Remove temporaries from geo_coast
+    cursor.execute(f"""
+        DELETE FROM {args.table}_lines WHERE name = 'temporary area river'""")
     cursor.execute(f"""
         SELECT count(*) FROM {args.table}_lines
         WHERE type LIKE '%STREAMS%' AND NOT ST_IsClosed(wkb_geometry) AND
@@ -613,6 +622,9 @@ def test_sample_area1(args, cursor):
 
     # Test object
     execute(args, cursor)
+    cursor.execute(f"""
+        SELECT id FROM {args.table}_lines WHERE name = 'candidate'""")
+    print(cursor.fetchall())
     cursor.execute(f"""
         SELECT count(*) FROM {args.table}_lines WHERE name = 'candidate'""")
     assert cursor.fetchall()[0][0] >= 1

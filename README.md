@@ -64,13 +64,15 @@ For the current export, execute the following SQL statement on your DB.
     INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50011, '/COASTLINE/tmp', 'LINESTRING(-19.702 46.999,-19.694 46.999)'::geometry);
     INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50012, '/COASTLINE/tmp', 'LINESTRING(-19.645 44.000,-19.497 44.000)'::geometry);
     INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50013, '/COASTLINE/tmp', 'LINESTRING(-16.664 44.002,-17.193 43.574,-17.002 42.951)'::geometry);
-    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50014, '/COASTLINE/tmp', 'LINESTRING(-19.497 44.000,-19.470 44.000)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50014, '/COASTLINE/tmp', 'LINESTRING(-19.653 44.000,-19.644 44.000)'::geometry);
     INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50015, '/COASTLINE/tmp', 'LINESTRING(-18.314 43.000,-18.308 43.000)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50016, '/COASTLINE/tmp', 'LINESTRING(-18.022 47.000,-18.018 47.000)'::geometry);
+    INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (50017, '/COASTLINE/tmp', 'LINESTRING(-20.000 45.685,-20.000 45.680)'::geometry);
 
-to xyz_lines
-
-just after the COASTLINE group.  This yields a (fake) closed
-coastline and benefits vegetation calculation.
+to *xyz_lines*.  This yields a (fake) closed coastline and benefits
+coast and river calculations.  The accuracy of these additional
+insertions is proven for *EPS = 0.006* in the various scripts.
+Changing EPS must take into account.
 
 ## Elevation
 
