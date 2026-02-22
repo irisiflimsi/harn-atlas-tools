@@ -9,13 +9,24 @@ they need to be eyeballed.
 Runtime is an estimate on my PC.
 
 The scripts are not re-entrant, i.e. don't call them a second time on
-the modified dataset.
+the modified dataset.  Many scripts take a -T as option to execute
+some tests.  All take a -v option to output more debug information.
 
 ## Extraction
 
-The following is the rough procedure to follow:
+The following is the rough procedure to follow.  First extract *peak*
+information with
 
-    python svg2geo.py -i ~/Downloads/HarnAtlas-Clean-01.91.svg -o xyz.json
+    python svg_replace.py -i ~/Downloads/HarnAtlas-Clean-01.91.svg -o ~/transformed.svg
+
+This change graphical letters with real text, which probably don't
+render nice but will be put into the database for later analysis.
+
+> Runtime: Seconds
+
+Then
+
+    python svg2geo.py -i ~/transformed.svg -o xyz.json
 
 This will create points, polygons and lines in separate files, called
 `xyz_<type>.json`, respectively. Because Shape files cannot have
@@ -114,8 +125,6 @@ remove rivers by a simple heuristic.  The coasts are not considered by
 `geo_elevation.py` yet. This will also find the big lakes that are
 connected to the coastline; Arain & Tontury currently.
 
-The script also takes a -T as option to execute some tests.
-
 * Uses *EPSL* to bridge shore gaps and *EPSB* to squeeze out rivers.
 
 > Runtime: 2 minutes
@@ -183,6 +192,33 @@ depending on the orientation of the linestring.
 
     python geo_rivers.py -t xyz -d user:password@dbname:host:port
 
-The script also takes a -T as option to execute some tests.
-
 > Runtime: 45 minutes
+
+## Elevation field
+
+The DB currently only contains peaks as such.  The following script
+uses proximity of the text before with a peak to label and associate a
+height.
+
+    python geo_pts.py -t xyz -d user:password@dbname:host:port
+
+This will later be used to interpolate elevations from these peaks and
+the elevation lines.
+
+> Runtime: Seconds
+
+The next step is a a computationally more involved process.
+Interpolation is not trivial and needs some *numerical stability*.
+
+    python geo_height.py -v -t xyz -d user:password@dbname:localhost:25432
+
+The script creates an elevation field called *all.tif*.
+
+The area is hard-coded as [-16.7,-16.5] x [40.35, 40.55].  With a
+scale of 50m x 50m pixels (also hard-coded), this takes just over 4
+minutes. (See the script for the also hard-coded height-scale.)
+
+At this scale all of Harn (10 x 15) we can expect roughly 10 full
+24h-days of straight calculation.
+
+> Runtime: 4:10 minutes

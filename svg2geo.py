@@ -7,12 +7,29 @@ import re
 import math
 import sys
 import argparse
+from dataclasses import dataclass
 from xml.etree import ElementTree
 import fiona
+# pylint: disable=no-name-in-module
 from fiona.crs import CRS
 import numpy
 from shapely.geometry import LineString, mapping, Point, Polygon
 from scipy.spatial import distance
+
+@dataclass
+class Outfiles:
+    """Encapsulate all out files."""
+    polygons = None
+    lines = None
+    points = None
+
+@dataclass
+class Size:
+    """Encapsulate box size."""
+    minx: int
+    miny: int
+    maxx: int
+    maxy: int
 
 class SID:
     """Encapsulate non-final global variable."""
@@ -40,10 +57,10 @@ NUM2 = NUM1 + NUM1
 NUM4 = NUM2 + NUM2
 NUM6 = NUM4 + NUM2
 
-def transform(mat, x_c, y_c):
+def transform(mat, x_c, y_c, size):
     """This is where the projection is 'hidden'."""
-    pts = ((mat[0]*x_c + mat[2]*y_c + mat[4] - SIZEMINX) / (SIZEMAXX - SIZEMINX) * 14 - 29,
-           50 - (mat[1]*x_c + mat[3]*y_c + mat[5] - SIZEMINY) / (SIZEMAXY - SIZEMINY) * 10)
+    pts = ((mat[0]*x_c + mat[2]*y_c + mat[4] - size.minx) / (size.maxx - size.minx) * 14 - 29,
+           50 - (mat[1]*x_c + mat[3]*y_c + mat[5] - size.miny) / (size.maxy - size.miny) * 10)
     return pts
 
 def attr2transform(attr):
@@ -104,7 +121,7 @@ def get_data_name(elem):
     """Get the data-name attribute or the id, if data-name doesn't exist."""
     return elem.attrib.get('data-name', elem.attrib.get('id', '-'))
 
-def parse_point(typ, elem, out_point_file):
+def parse_point(typ, elem, outfiles, size):
     """Parse point and write to file."""
     x_c = y_c = w_c = h_c = 0
     mat = attr2transform(elem.attrib.get('transform', '-'))
@@ -126,19 +143,19 @@ def parse_point(typ, elem, out_point_file):
         w_c = float(elem.attrib.get('width', 0))
         h_c = float(elem.attrib.get('height', 0))
         typ += '/' + elem.attrib.get('xlink:href', '-')
-        style = re.sub(r".* ","",elem.attrib.get('transform', '-'))
+        style = re.sub(r".* ", "", elem.attrib.get('transform', '-'))
     else:
         print(f"{elem.tag} shouldn't be here")
         return
     typ = get_href(typ, elem)
-    pointstring = Point(transform(mat, x_c + w_c/2., y_c + h_c/2.))
+    pointstring = Point(transform(mat, x_c + w_c/2., y_c + h_c/2., size))
     SID.inc_sid()
-    out_point_file.write({'geometry': mapping(pointstring),
-                          'properties': {'id': SID.get_sid(), 'type': typ,
-                                         'name': name, 'svgid': elem.attrib.get('id', '-'),
-                                         'style': style}})
+    outfiles.points.write({'geometry': mapping(pointstring),
+                           'properties': {'id': SID.get_sid(), 'type': typ,
+                                          'name': name, 'svgid': elem.attrib.get('id', '-'),
+                                          'style': style}})
 
-def parse_path(typ, elem, out_lines_file, out_point_file):
+def parse_path(typ, elem, outfiles, size):
     """Parse path and write to file as line."""
     x_c = y_c = x0_c = y0_c = xb_c = yb_c = 0
     mat = [1, 0, 0, 1, 0, 0]
@@ -152,72 +169,74 @@ def parse_path(typ, elem, out_lines_file, out_point_file):
         path = path.strip(' ')
         if path.startswith('M'):
             if len(line) > 0:
-                out_line(line, typ, name, out_lines_file, elem)
+                out_line(line, typ, name, outfiles, elem)
             line = []
             match = re.match(rf"M{NUM2}", path)
             x_c = float(match.group(1))
             y_c = float(match.group(2))
             xb_c = x0_c = x_c
             yb_c = y0_c = y_c
-            line.append(transform(mat, x_c, y_c))
+            line.append(transform(mat, x_c, y_c, size))
             path = re.sub(rf"M{NUM2}", '', path, 1)
         elif path.startswith('L'):
             match = re.match(rf"L{NUM2}", path)
             xb_c = x_c = float(match.group(1))
             yb_c = y_c = float(match.group(2))
-            line.append(transform(mat, x_c, y_c))
+            line.append(transform(mat, x_c, y_c, size))
             path = re.sub(rf"L{NUM2}", '', path, 1)
         elif path.startswith('l'):
             path = path[1:]
             while match := re.match(rf"{NUM2}", path):
                 x_c += float(match.group(1))
                 y_c += float(match.group(2))
-                line.append(transform(mat, x_c, y_c))
+                line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM2} ?,?", '', path, 1)
             xb_c = x_c
             yb_c = y_c
         elif path.startswith('V'):
             match = re.match(rf"V{NUM1}", path)
             yb_c = y_c = float(match.group(1))
-            line.append(transform(mat, x_c, y_c))
+            line.append(transform(mat, x_c, y_c, size))
             path = re.sub(rf"V{NUM1}", '', path, 1)
         elif path.startswith('v'):
             path = path[1:]
             while match := re.match(rf"{NUM1}", path):
                 y_c += float(match.group(1))
-                line.append(transform(mat, x_c, y_c))
+                line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM1}", '', path, 1)
             yb_c = y_c
         elif path.startswith('H'):
             match = re.match(rf"H{NUM1}", path)
             xb_c = x_c = float(match.group(1))
-            line.append(transform(mat, x_c, y_c))
+            line.append(transform(mat, x_c, y_c, size))
             path = re.sub(rf"H{NUM1}", '', path, 1)
         elif path.startswith('h'):
             path = path[1:]
             while match := re.match(rf"{NUM1}", path):
                 x_c += float(match.group(1))
-                line.append(transform(mat, x_c, y_c))
+                line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM1}", '', path, 1)
             xb_c = x_c
         elif path.startswith('Z'):
-            line.append(transform(mat, x0_c, y0_c))
+            line.append(transform(mat, x0_c, y0_c, size))
             path = path[1:]
-            out_line(line, typ, name, out_lines_file, elem)
+            out_line(line, typ, name, outfiles, elem)
             line = []
         elif path.startswith('c'):
             # Specific copy symbol
-            if "c0,1.24-1.01,2.25-2.25,2.25s-2.25-1.01-2.25-2.25,1.01-2.25,2.25-2.25,2.25,1.01,2.25,2.25Z" in path:
+            sym1 = "c0,1.24-1.01,2.25-2.25,2.25s-2.25-1.01-2.25"
+            sym2 = "-2.25,1.01-2.25,2.25-2.25,2.25,1.01,2.25,2.25Z"
+            if sym1 + sym2 in path:
                 print(f"special path for: {name}")
                 x_c += 5.5
                 y_c += 7.5
                 w_c = h_c = 4.5
-                pointstring = Point(transform(mat, x_c + w_c/2., y_c + h_c/2.))
+                pointstring = Point(transform(mat, x_c + w_c/2., y_c + h_c/2., size))
                 SID.inc_sid()
-                out_point_file.write({'geometry': mapping(pointstring), 'properties':
-                                      {'id': SID.get_sid(), 'type': 'special copy',
-                                       'name': name, 'svgid': elem.attrib.get('id', '-'),
-                                       'style': '-'}})
+                outfiles.points.write({'geometry': mapping(pointstring), 'properties':
+                                       {'id': SID.get_sid(), 'type': 'special copy',
+                                        'name': name, 'svgid': elem.attrib.get('id', '-'),
+                                        'style': '-'}})
                 return
             path = path[1:]
             while match := re.match(rf"{NUM6}", path):
@@ -236,8 +255,8 @@ def parse_path(typ, elem, out_lines_file, out_point_file):
                         3*(1 - tdf)*pow(tdf, 2)*xb_c + pow(tdf, 3)*x_c
                     yt_c = pow(1 - tdf, 3)*y1_c + 3*pow(1 - tdf, 2)*(tdf)*y2_c + \
                         3*(1 - tdf)*pow(tdf, 2)*yb_c + pow(tdf, 3)*y_c
-                    line.append(transform(mat, xt_c, yt_c))
-                line.append(transform(mat, x_c, y_c))
+                    line.append(transform(mat, xt_c, yt_c, size))
+                line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM6} ?,?", '', path, 1)
         elif path.startswith('s'):
             path = path[1:]
@@ -257,8 +276,8 @@ def parse_path(typ, elem, out_lines_file, out_point_file):
                         3*(1 - tdf)*pow(tdf, 2)*xb_c + pow(tdf, 3)*x_c
                     yt_c = pow(1 - tdf, 3)*y1_c + 3*pow(1 - tdf, 2)*(tdf)*y2_c + \
                         3*(1 - tdf)*pow(tdf, 2)*yb_c + pow(tdf, 3)*y_c
-                    line.append(transform(mat, xt_c, yt_c))
-                line.append(transform(mat, x_c, y_c))
+                    line.append(transform(mat, xt_c, yt_c, size))
+                line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM4} ?,?", '', path, 1)
         elif path.startswith('C'):
             path = path[1:]
@@ -278,8 +297,8 @@ def parse_path(typ, elem, out_lines_file, out_point_file):
                         3*(1 - tdf)*pow(tdf, 2)*xb_c + pow(tdf, 3)*x_c
                     yt_c = pow(1 - tdf, 3)*y1_c + 3*pow(1 - tdf, 2)*(tdf)*y2_c + \
                         3*(1 - tdf)*pow(tdf, 2)*yb_c + pow(tdf, 3)*y_c
-                    line.append(transform(mat, xt_c, yt_c))
-                line.append(transform(mat, x_c, y_c))
+                    line.append(transform(mat, xt_c, yt_c, size))
+                line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM6} ?,?", '', path, 1)
         elif path.startswith("q"):
             path = path[1:]
@@ -295,8 +314,8 @@ def parse_path(typ, elem, out_lines_file, out_point_file):
                     tdf = float(t_c/dist)
                     xt_c = pow(1 - tdf, 2)*x1_c + 2*(1 - tdf)*(tdf)*xb_c + pow(tdf, 2)*x_c
                     yt_c = pow(1 - tdf, 2)*y1_c + 2*(1 - tdf)*(tdf)*yb_c + pow(tdf, 2)*y_c
-                    line.append(transform(mat, xt_c, yt_c))
-                line.append(transform(mat, x_c, y_c))
+                    line.append(transform(mat, xt_c, yt_c, size))
+                line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM4} ?,?", '', path, 1)
         elif path.startswith('t'):
             path = path[1:]
@@ -312,26 +331,26 @@ def parse_path(typ, elem, out_lines_file, out_point_file):
                     tdf = float(t_c/dist)
                     xt_c = pow(1 - tdf, 2)*x1_c + 2*(1 - tdf)*(tdf)*xb_c + pow(tdf, 2)*x_c
                     yt_c = pow(1 - tdf, 2)*y1_c + 2*(1 - tdf)*(tdf)*yb_c + pow(tdf, 2)*y_c
-                    line.append(transform(mat, xt_c, yt_c))
-                line.append(transform(mat, x_c, y_c))
+                    line.append(transform(mat, xt_c, yt_c, size))
+                line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM2} ?,?", '', path, 1)
         else:
             print(f"broken path:{path}:")
             path = ""
-    out_line(line, typ, name, out_lines_file, elem)
+    out_line(line, typ, name, outfiles, elem)
 
-def out_line(line, typ, name, out_lines_file, elem):
+def out_line(line, typ, name, outfiles, elem):
     """Terminate a line in path."""
     if len(line) > 1:
         line_string = LineString(line)
         SID.inc_sid()
-        out_lines_file.write(
+        outfiles.lines.write(
             {'geometry': mapping(line_string),
              'properties': {'id': SID.get_sid(), 'type': typ, 'len': len(line),
                             'name': name, 'svgid': elem.attrib.get('id', '-'),
                             'style': STYLES[elem.attrib.get('class', '-')]}})
 
-def parse_polygon(typ, elem, out_polygon_file):
+def parse_polygon(typ, elem, outfiles, size):
     """Parse polygon and write to file."""
     x_c = y_c = 0
     mat = [1, 0, 0, 1, 0, 0]
@@ -344,18 +363,18 @@ def parse_polygon(typ, elem, out_polygon_file):
         x_c = float(points[0])
         y_c = float(points[1])
         points = points[2:]
-        line.append(transform(mat, x_c, y_c))
+        line.append(transform(mat, x_c, y_c, size))
     typ = get_href(typ, elem)
     if len(line) > 1:
         polygon = Polygon(line)
         SID.inc_sid()
-        out_polygon_file.write({'geometry': mapping(polygon),
-                                'properties': {'id': SID.get_sid(), 'type': typ,
-                                               'name': name, 'svgid': elem.attrib.get('id', '-')}})
+        outfiles.polygons.write({'geometry': mapping(polygon),
+                                 'properties': {'id': SID.get_sid(), 'type': typ,
+                                                'name': name, 'svgid': elem.attrib.get('id', '-')}})
     else:
         print(f"pathological:{SID.get_sid()}")
 
-def parse_line(typ, elem, out_lines_file):
+def parse_line(typ, elem, outfiles, size):
     """Parse line and write to file."""
     x_c = y_c = 0
     mat = [1, 0, 0, 1, 0, 0]
@@ -369,14 +388,14 @@ def parse_line(typ, elem, out_lines_file):
             x_c = float(points[0])
             y_c = float(points[1])
             points = points[2:]
-            line.append(transform(mat, x_c, y_c))
+            line.append(transform(mat, x_c, y_c, size))
     elif elem.tag.endswith('line'):
         x1_c = float(elem.attrib['x1'])
         y1_c = float(elem.attrib['y1'])
         x2_c = float(elem.attrib['x2'])
         y2_c = float(elem.attrib['y2'])
         typ += '/' + name
-        line = [transform(mat, x1_c, y1_c), transform(mat, x2_c, y2_c)]
+        line = [transform(mat, x1_c, y1_c, size), transform(mat, x2_c, y2_c, size)]
     else:
         print(f"{elem.tag} shouldn't be here")
         return
@@ -384,7 +403,7 @@ def parse_line(typ, elem, out_lines_file):
     if len(line) > 1:
         line_string = LineString(line)
         SID.inc_sid()
-        out_lines_file.write(
+        outfiles.lines.write(
             {'geometry': mapping(line_string),
              'properties': {'id': SID.get_sid(), 'type': typ,
                             'len': len(line), 'name': name, 'svgid': name,
@@ -422,33 +441,32 @@ def parse_style(args, text):
                 else:
                     STYLES[key[1:]] = line
 
-def parse(args, name, root, out_polygon_file, out_point_file, out_lines_file):
+def parse(args, name, root, outfiles, size):
     """Parse and write everything to the files."""
     for elem in list(root):
         if elem.tag.endswith('polygon'):
-            parse_polygon(name, elem, out_polygon_file)
+            parse_polygon(name, elem, outfiles, size)
         elif elem.tag.endswith('path'):
-            parse_path(name, elem, out_lines_file, out_point_file)
+            parse_path(name, elem, outfiles, size)
         elif elem.tag.endswith('polyline'):
-            parse_line(name, elem, out_lines_file)
+            parse_line(name, elem, outfiles, size)
         elif elem.tag.endswith('line'):
-            parse_line(name, elem, out_lines_file)
+            parse_line(name, elem, outfiles, size)
         elif elem.tag.endswith('use'):
-            parse_point(name, elem, out_point_file)
+            parse_point(name, elem, outfiles, size)
         elif elem.tag.endswith('rect'):
-            parse_point(name, elem, out_point_file)
+            parse_point(name, elem, outfiles, size)
         elif elem.tag.endswith('circle'):
-            parse_point(name, elem, out_point_file)
+            parse_point(name, elem, outfiles, size)
         elif elem.tag.endswith('defs'):
-            parse(args, name, elem, out_polygon_file, out_point_file, out_lines_file)
+            parse(args, name, elem, outfiles, size)
         elif elem.tag.endswith('symbol'):
             parse_symbol(args, elem)
         elif elem.tag.endswith('g'):
             # Some of this stuff isn't really necessary
             if get_data_name(elem) not in ['GRID_NUMBERS', 'KINGDOM_MAPS',
                                            'ATLAS_MAPS', 'MAP_GRIDS', 'HEXES']:
-                parse(args, f"{name}/{get_data_name(elem)}", elem,
-                      out_polygon_file, out_point_file, out_lines_file)
+                parse(args, f"{name}/{get_data_name(elem)}", elem, outfiles, size)
         elif elem.tag.endswith('MetaInfo'):
             pass
         elif elem.tag.endswith('text'):
@@ -468,6 +486,63 @@ def parse(args, name, root, out_polygon_file, out_point_file, out_lines_file):
         else:
             print(f"{elem.tag} not expected")
 
+def tests(args):
+    """Collect all tests."""
+    num_tests = 0
+    if args.verbose:
+        print("test simple scale 1")
+    assert attr2transform('scale(2,3)') == [2, 0, 0, 3, 0, 0], "simple scale 1"
+    num_tests += 1
+    if args.verbose:
+        print("test simple scale 2")
+    assert attr2transform('scale(2)') == [2, 0, 0, 1, 0, 0], "simple scale 2"
+    num_tests += 1
+    if args.verbose:
+        print("test simple matrix")
+    assert attr2transform('matrix(2 3 4 5 6 7)') == [2, 3, 4, 5, 6, 7], "simple matrix"
+    num_tests += 1
+    if args.verbose:
+        print("test simple translate 1")
+    assert attr2transform('translate(2 3)') == [1, 0, 0, 1, 2, 3], "simple translate 1"
+    num_tests += 1
+    if args.verbose:
+        print("test simple translate 2")
+    assert attr2transform('translate(2)') == [1, 0, 0, 1, 2, 0], "simple translate 2"
+    num_tests += 1
+    if args.verbose:
+        print("test rotate")
+    assert numpy.allclose(attr2transform('rotate(30)'),
+                          [.866, .5, -.5, .866, 0, 0],
+                          atol=1e-3), f"simple matrix={attr2transform('rotate(30)')}"
+    num_tests += 1
+    if args.verbose:
+        print("test rotate translate")
+    assert numpy.allclose(attr2transform('rotate(90) translate(1)'),
+                          [0, 1, -1, 0, 0, 1], atol=1e-3), f"order rotate translate"
+    num_tests += 1
+    if args.verbose:
+        print("test translate rotate")
+    assert numpy.allclose(attr2transform('translate(1) rotate(90)'),
+                          [0, 1, -1, 0, 1, 0], atol=1e-3), "order translate rotate"
+    num_tests += 1
+    # Test special curve variants. Eyeball output.
+    if args.verbose:
+        print("test curves in svg paths")
+    path = "M10,10C20,20 30,20 40,20c10,-10 20,-10 30,0" + \
+        "s10,10 10,0q10,-10 10,0t10,0Z"
+    svg = f'<svg><path d="{path}" stroke="black" stroke-width=".01" ' + \
+        'fill="transparent"/></svg>'
+    with open("unittest.svg", 'w') as svg_test_out_file:
+        print(svg, file=svg_test_out_file)
+    test_outfiles = Outfiles()
+    with fiona.open("unittest.json", 'w', 'GeoJSON', schema=SCHEMA_LINES,
+                    crs=CRS.from_epsg(4326)) as test_outfiles.lines:
+        elem = ElementTree.fromstring(svg)[0]
+        test_size = Size(0, 0, 1, 1)
+        parse_path("type", elem, test_outfiles, test_size)
+    num_tests += 1 # We came here
+    print(f"> {num_tests} tests passed")
+
 def main():
     """Main method."""
     parser = argparse.ArgumentParser(
@@ -480,67 +555,23 @@ def main():
                         required=False)
     parser.add_argument('-o', '--output', dest='outfile', help='output file name',
                         required=True)
-    parser.add_argument('-t', '--test', action='store_true', help='run tests instead',
+    parser.add_argument('-T', '--test', action='store_true', help='run tests instead',
                         required=False)
     args = parser.parse_args()
 
     if args.test:
-        if args.verbose:
-            print("test simple scale 1")
-        assert attr2transform('scale(2,3)') == [2, 0, 0, 3, 0, 0], "simple scale 1"
-        if args.verbose:
-            print("test simple scale 2")
-        assert attr2transform('scale(2)') == [2, 0, 0, 1, 0, 0], "simple scale 2"
-        if args.verbose:
-            print("test simple matrix")
-        assert attr2transform('matrix(2 3 4 5 6 7)') == [2, 3, 4, 5, 6, 7], "simple matrix"
-        if args.verbose:
-            print("test simple translate 1")
-        assert attr2transform('translate(2 3)') == [1, 0, 0, 1, 2, 3], "simple translate 1"
-        if args.verbose:
-            print("test simple translate 2")
-        assert attr2transform('translate(2)') == [1, 0, 0, 1, 2, 0], "simple translate 2"
-        if args.verbose:
-            print("test rotate")
-        assert numpy.allclose(attr2transform('rotate(30)'),
-                              [.866, .5, -.5, .866, 0, 0],
-                              atol=1e-3), f"simple matrix={attr2transform('rotate(30)')}"
-        if args.verbose:
-            print("test rotate translate")
-        assert numpy.allclose(attr2transform('rotate(90) translate(1)'),
-                              [0, 1, -1, 0, 0, 1], atol=1e-3), f"order rotate translate"
-        if args.verbose:
-            print("test translate rotate")
-        assert numpy.allclose(attr2transform('translate(1) rotate(90)'),
-                              [0, 1, -1, 0, 1, 0], atol=1e-3), "order translate rotate"
-        # Test special curve variants. Eyeball output.
-        if args.verbose:
-            print("test curves in svg paths")
-        path = "M10,10C20,20 30,20 40,20c10,-10 20,-10 30,0" + \
-            "s10,10 10,0q10,-10 10,0t10,0Z"
-        svg = f'<svg><path d="{path}" stroke="black" stroke-width=".01" ' + \
-            'fill="transparent"/></svg>'
-        with open("unittest.svg", 'w') as svg_test_out_file:
-            print(svg, file=svg_test_out_file)
-        with fiona.open("unittest.json", 'w', 'GeoJSON', schema=SCHEMA_LINES,
-                        crs=CRS.from_epsg(4326)) as json_test_out_file:
-            elem = ElementTree.fromstring(svg)[0]
-            parse_path("type", elem, json_test_out_file, None)
-
+        tests(args)
     else:
         root = ElementTree.parse(args.infile).getroot()
         el_a1 = root.find(".//*[@id='A1']")
         if el_a1 is None:
             el_a1 = root.find(".//*[@data-name='A1']")
-        global SIZEMINX
+        size = Size()
         print(el_a1)
-        SIZEMINX = float(el_a1.attrib.get('x', 0))
-        global SIZEMINY
-        SIZEMINY = float(el_a1.attrib.get('y', 0))
-        global SIZEMAXX
-        SIZEMAXX = float(el_a1.attrib.get('x', 0)) + 14 * float(el_a1.attrib.get('width', 0))
-        global SIZEMAXY
-        SIZEMAXY = float(el_a1.attrib.get('y', 0)) + 10 * float(el_a1.attrib.get('height', 0))
+        size.minx = float(el_a1.attrib.get('x', 0))
+        size.miny = float(el_a1.attrib.get('y', 0))
+        size.maxx = float(el_a1.attrib.get('x', 0)) + 14 * float(el_a1.attrib.get('width', 0))
+        size.maxy = float(el_a1.attrib.get('y', 0)) + 10 * float(el_a1.attrib.get('height', 0))
         if args.outfile.endswith('.shp'):
             if args.verbose:
                 print("output ESRI shapefile")
@@ -558,13 +589,14 @@ def main():
                   "Use ogr2ogr for other formats.")
             sys.exit(-1)
 
+        outfiles = Outfiles()
         with fiona.open(f"{prefix}_polys.{ext}", 'w', outformat,
-                        schema=SCHEMA_POLYGONS, crs=CRS.from_epsg(4326)) as out_polygon_file:
+                        schema=SCHEMA_POLYGONS, crs=CRS.from_epsg(4326)) as outfiles.polygons:
             with fiona.open(f"{prefix}_pts.{ext}", 'w', outformat,
-                            schema=SCHEMA_POINTS, crs=CRS.from_epsg(4326)) as out_point_file:
+                            schema=SCHEMA_POINTS, crs=CRS.from_epsg(4326)) as outfiles.points:
                 with fiona.open(f"{prefix}_lines.{ext}", 'w', outformat,
-                                schema=SCHEMA_LINES, crs=CRS.from_epsg(4326)) as out_lines_file:
-                    parse(args, '', root, out_polygon_file, out_point_file, out_lines_file)
+                                schema=SCHEMA_LINES, crs=CRS.from_epsg(4326)) as outfiles.lines:
+                    parse(args, '', root, outfiles, size)
 
 if __name__ == '__main__':
     main()

@@ -34,6 +34,7 @@ setup: postgis xyz_lines.json xyz_polys.json xyz_pts.json
 	 -c "DROP TABLE IF EXISTS xyz_polys"\
 	 -c "DROP TABLE IF EXISTS xyz_pts"\
          -c "CREATE EXTENSION IF NOT EXISTS postgis_sfcgal"
+         -c "CREATE EXTENSION IF NOT EXISTS postgis_raster"
 	ogr2ogr -f PostgreSQL $(db) xyz_lines.json -nln xyz_lines
 	ogr2ogr -f PostgreSQL $(db) xyz_polys.json -nln xyz_polys
 	ogr2ogr -f PostgreSQL $(db) xyz_pts.json -nln xyz_pts

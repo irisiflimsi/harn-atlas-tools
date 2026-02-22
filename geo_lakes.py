@@ -33,26 +33,31 @@ def main():
 
     # Initialize
     cursor.execute(f"""
-        ALTER TABLE {args.table}_lines ALTER id SET NOT NULL;
-        SELECT id, wkb_geometry FROM {args.table}_lines WHERE type LIKE '%LAKES%'""")
+      ALTER TABLE {args.table}_lines ALTER id SET NOT NULL;
+      SELECT id, wkb_geometry FROM {args.table}_lines WHERE type LIKE '%LAKES%'
+    """)
     print(f"Identifying lines: {cursor.fetchall()[0][0]}")
 
     # All colored closed lines are lakes
     print("Elevate all lakes")
     cursor.execute(f"""
-        UPDATE {args.table}_lines SET type = 'Lake'
-        WHERE ST_IsClosed(wkb_geometry) AND type LIKE '%LAKES%' AND style LIKE '%fill: #d4effc%'""")
+      UPDATE {args.table}_lines SET type = 'Lake'
+      WHERE ST_IsClosed(wkb_geometry) AND type LIKE '%LAKES%' AND style LIKE '%fill: #d4effc%'
+    """)
 
     cursor.execute(f"""
-        UPDATE {args.table}_lines AS t1 SET type = 'Lake',
-          wkb_geometry = (
-            SELECT ST_AddPoint(geo, ST_StartPoint(geo))
-            FROM (
-              SELECT (ST_Dump(ST_Node(wkb_geometry))).geom AS geo
-              FROM {args.table}_lines AS t2
-              WHERE t1.id = t2.id AND t2.style LIKE '%fill: #d4effc%')
-            ORDER BY ST_Length(geo) DESC LIMIT 1)
-        WHERE type LIKE '%LAKES%' AND style LIKE '%fill: #d4effc%'""")
+      UPDATE {args.table}_lines AS t1 SET type = 'Lake',
+        wkb_geometry = (
+          SELECT ST_AddPoint(geo, ST_StartPoint(geo))
+          FROM (
+            SELECT (ST_Dump(ST_Node(wkb_geometry))).geom AS geo
+            FROM {args.table}_lines AS t2
+            WHERE t1.id = t2.id AND t2.style LIKE '%fill: #d4effc%'
+          )
+          ORDER BY ST_Length(geo) DESC LIMIT 1
+        )
+      WHERE type LIKE '%LAKES%' AND style LIKE '%fill: #d4effc%'
+    """)
     conn.commit()
 
 if __name__ == '__main__':

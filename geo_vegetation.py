@@ -19,26 +19,30 @@ def make_swamp(args, cursor):
 
     # Areas as lines
     cursor.execute(f"""
-        SELECT topring.id, ST_MakeValid(ST_MakePolygon(topring.wkb_geometry))
-        FROM {args.table}_lines AS topring
-        WHERE ST_IsClosed(topring.wkb_geometry) AND
-          topring.type LIKE '%SWAMP%' AND
-          NOT EXISTS (
-            SELECT * FROM {args.table}_lines AS covers
-            WHERE covers.type LIKE '%SWAMP%' AND
-              topring.id <> covers.id AND
-              CASE WHEN ST_IsClosed(covers.wkb_geometry) THEN
-                ST_Covers(ST_MakePolygon(covers.wkb_geometry), topring.wkb_geometry) END)""")
+      SELECT topring.id, ST_MakeValid(ST_MakePolygon(topring.wkb_geometry))
+      FROM {args.table}_lines AS topring
+      WHERE ST_IsClosed(topring.wkb_geometry) AND
+        topring.type LIKE '%SWAMP%' AND
+        NOT EXISTS (
+          SELECT * FROM {args.table}_lines AS covers
+          WHERE covers.type LIKE '%SWAMP%' AND
+            topring.id <> covers.id AND
+            CASE WHEN ST_IsClosed(covers.wkb_geometry) THEN
+              ST_Covers(ST_MakePolygon(covers.wkb_geometry), topring.wkb_geometry)
+            END
+        )
+    """)
     ret = []
     for poly in cursor.fetchall():
         cursor.execute(f"""
-            SELECT ST_Union(ST_MakeValid(ST_MakePolygon(wkb_geometry)))
-            FROM {args.table}_lines
-            WHERE type LIKE '%SWAMP%' AND ST_NPoints(wkb_geometry) > 3 AND
-              {poly[0]} <> id AND
-              CASE WHEN ST_IsClosed(wkb_geometry) THEN
-                ST_Covers('{poly[1]}'::geometry, ST_MakePolygon(wkb_geometry))
-              END""")
+          SELECT ST_Union(ST_MakeValid(ST_MakePolygon(wkb_geometry)))
+          FROM {args.table}_lines
+          WHERE type LIKE '%SWAMP%' AND ST_NPoints(wkb_geometry) > 3 AND
+            {poly[0]} <> id AND
+            CASE WHEN ST_IsClosed(wkb_geometry) THEN
+              ST_Covers('{poly[1]}'::geometry, ST_MakePolygon(wkb_geometry))
+            END
+        """)
         holes = cursor.fetchall()[0]
         if args.verbose:
             print(f"- swamp poly {poly[0]}")
@@ -46,27 +50,38 @@ def make_swamp(args, cursor):
             if args.verbose:
                 print(f"- - with holes")
             cursor.execute(f"""
-                SELECT ST_Difference('{poly[1]}'::geometry, '{holes[0]}'::geometry)""")
+              SELECT ST_Difference('{poly[1]}'::geometry, '{holes[0]}'::geometry)
+            """)
             ret.append([cursor.fetchall()[0][0]])
         else:
             ret.append([poly[1]])
 
     # Symbols on polys
     cursor.execute(f"""
-        SELECT ST_Buffer(
-            ST_Buffer(
-              ST_Buffer(ST_Union(ST_MakeValid(wkb_geometry)), {EPSI}), -{EPSD}), {EPSD})
-        FROM {args.table}_polys
-        WHERE type LIKE '%SWAMP%'""")
+      SELECT ST_Buffer(
+        ST_Buffer(
+          ST_Buffer(ST_Union(ST_MakeValid(wkb_geometry)), {EPSI}),
+          -{EPSD}
+        ),
+        {EPSD}
+      )
+      FROM {args.table}_polys
+      WHERE type LIKE '%SWAMP%'
+    """)
     ret.append([cursor.fetchall()[0][0]])
 
     # Symbols on lines
     cursor.execute(f"""
-        SELECT ST_Buffer(
-            ST_Buffer(
-              ST_Buffer(ST_Union(wkb_geometry), {EPSI}), -{EPSD}), {EPSD})
-        FROM {args.table}_lines
-        WHERE NOT ST_IsClosed(wkb_geometry) AND type LIKE '%SWAMP%'""")
+      SELECT ST_Buffer(
+        ST_Buffer(
+          ST_Buffer(ST_Union(wkb_geometry), {EPSI}),
+          -{EPSD}
+        ),
+        {EPSD}
+      )
+      FROM {args.table}_lines
+      WHERE NOT ST_IsClosed(wkb_geometry) AND type LIKE '%SWAMP%'
+    """)
     ret.append([cursor.fetchall()[0][0]])
     return ret
 
@@ -108,9 +123,10 @@ def main():
     sql_area = "type LIKE '%" + "%' OR type LIKE '%".join(types) + "%'"
     # Initialize
     cursor.execute(f"""
-        CREATE TEMP SEQUENCE IF NOT EXISTS serial START 300000;
-        ALTER TABLE {args.table}_polys ALTER id SET NOT NULL;
-        SELECT count(*) FROM {args.table}_lines WHERE {sql_area}""")
+      CREATE TEMP SEQUENCE IF NOT EXISTS serial START 300000;
+      ALTER TABLE {args.table}_polys ALTER id SET NOT NULL;
+      SELECT count(*) FROM {args.table}_lines WHERE {sql_area}
+    """)
     print(f"Identifying areas: {cursor.fetchall()[0][0]}")
     redux = {}
     raw = {}
@@ -118,9 +134,10 @@ def main():
         print(f"Set up {typ}")
         if typ == "WOODLAND":
             cursor.execute(f"""
-                SELECT ST_MakePolygon(wkb_geometry)
-                FROM {args.table}_lines
-                WHERE type = '0' AND ST_NPoints(wkb_geometry) > 3""")
+              SELECT ST_MakePolygon(wkb_geometry)
+              FROM {args.table}_lines
+              WHERE type = '0' AND ST_NPoints(wkb_geometry) > 3
+            """)
             rows = list(cursor.fetchall())
             land = geo_array(rows)
             cursor.execute(f"""SELECT ST_Union(ARRAY[{land}])""")
@@ -129,10 +146,13 @@ def main():
             rows = make_swamp(args, cursor)
         else:
             cursor.execute(f"""
-                SELECT ST_Buffer(
-                  ST_MakePolygon(ST_AddPoint(wkb_geometry, ST_StartPoint(wkb_geometry))), {EPSG}, 2)
-                FROM {args.table}_lines
-                WHERE type LIKE '%{typ}%' AND ST_NPoints(wkb_geometry) > 3""")
+              SELECT ST_Buffer(
+                ST_MakePolygon(ST_AddPoint(wkb_geometry, ST_StartPoint(wkb_geometry))),
+                {EPSG}, 2
+              )
+              FROM {args.table}_lines
+              WHERE type LIKE '%{typ}%' AND ST_NPoints(wkb_geometry) > 3
+            """)
             rows = list(cursor.fetchall())
         raw[typ] = geo_array(rows)
         print(f"Found {len(rows)}")
@@ -144,42 +164,53 @@ def main():
             if args.verbose:
                 print(f"- reduce {ty_i} by {types[j]}")
             cursor.execute(f"""
-                SELECT ST_Union(ARRAY[{raw[types[j]]}])""")
+              SELECT ST_Union(ARRAY[{raw[types[j]]}])
+            """)
             cursor.execute(f"""
-                SELECT ST_Difference(
-                  ST_Union(ARRAY[{redux[ty_i]}]), ST_Union(ARRAY[{raw[types[j]]}]))""")
+              SELECT ST_Difference(
+                ST_Union(ARRAY[{redux[ty_i]}]), ST_Union(ARRAY[{raw[types[j]]}])
+              )
+            """)
             redux[ty_i] = geo_array(list(cursor.fetchall()))
 
         cursor.execute(f"""
-            WITH ret AS (
-              INSERT INTO {args.table}_polys (id, name, type, wkb_geometry)
-              SELECT nextval('serial'), '-', 'VEGTMP/{ty_i}', tl.geo FROM (
-                SELECT (ST_Dump(ST_Union(ARRAY[{redux[ty_i]}]))).geom)
-              AS tl (geo)
-              WHERE ST_GeometryType(tl.geo) = 'ST_Polygon' RETURNING id)
-            SELECT * FROM ret""")
+          WITH ret AS (
+            INSERT INTO {args.table}_polys (id, name, type, wkb_geometry)
+            SELECT nextval('serial'), '-', 'VEGTMP/{ty_i}', t1.geo FROM (
+              SELECT (ST_Dump(ST_Union(ARRAY[{redux[ty_i]}]))).geom
+            )
+            AS t1 (geo)
+            WHERE ST_GeometryType(t1.geo) = 'ST_Polygon' RETURNING id
+          )
+          SELECT * FROM ret
+        """)
         if args.verbose:
             print(f"- normalized {len(cursor.fetchall())}")
 
     print(f"Restrict real vegetation to land")
     cursor.execute(f"""
-        INSERT INTO {args.table}_polys (id, name, type, wkb_geometry)
-        SELECT nextval('serial'), '-', 'VEG/' || tl.typ, tl.geo FROM (
-          SELECT (ST_Dump(ST_Intersection(wkb_geometry, '{land_sql}'::geometry))).geom, substring(type, 8)
-          FROM {args.table}_polys
-          WHERE type LIKE '%VEGTMP/%' AND type NOT LIKE '%SHOAL%')
-        AS tl (geo, typ)""")
+      INSERT INTO {args.table}_polys (id, name, type, wkb_geometry)
+      SELECT nextval('serial'), '-', 'VEG/' || t1.typ, t1.geo FROM (
+        SELECT (ST_Dump(ST_Intersection(wkb_geometry, '{land_sql}'::geometry))).geom, substring(type, 8)
+        FROM {args.table}_polys
+        WHERE type LIKE '%VEGTMP/%' AND type NOT LIKE '%SHOAL%'
+      )
+      AS t1 (geo, typ)
+    """)
     print(f"Restrict shoal/reef to off land")
     cursor.execute(f"""
-        INSERT INTO {args.table}_polys (id, name, type, wkb_geometry)
-        SELECT nextval('serial'), '-', 'VEG/' || tl.typ, tl.geo FROM (
-          SELECT (ST_Dump(ST_Difference(wkb_geometry, '{land_sql}'::geometry))).geom, substring(type, 8)
-          FROM {args.table}_polys
-          WHERE type LIKE '%VEGTMP/%' AND type LIKE '%SHOAL%')
-        AS tl (geo, typ)""")
+      INSERT INTO {args.table}_polys (id, name, type, wkb_geometry)
+      SELECT nextval('serial'), '-', 'VEG/' || t1.typ, t1.geo FROM (
+        SELECT (ST_Dump(ST_Difference(wkb_geometry, '{land_sql}'::geometry))).geom, substring(type, 8)
+        FROM {args.table}_polys
+        WHERE type LIKE '%VEGTMP/%' AND type LIKE '%SHOAL%'
+      )
+      AS t1 (geo, typ)
+    """)
     cursor.execute(f"""
-        DELETE FROM {args.table}_polys
-        WHERE type LIKE '%VEGTMP/%'""")
+      DELETE FROM {args.table}_polys
+      WHERE type LIKE '%VEGTMP/%'
+    """)
 
     conn.commit()
 
