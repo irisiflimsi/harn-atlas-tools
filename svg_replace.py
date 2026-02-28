@@ -1,4 +1,5 @@
 #!/usr/bin/python
+# -*- coding: utf-8 -*-
 """
 Extract additional information
 """
@@ -7,47 +8,47 @@ import sys
 import re
 
 LETTERS = {
-    "c0-.6.0": "0",
-    "h-.33": "1",
-    "v.42": "2",
-    "l.32-.0": "3",
-    "v-.86s-": "4",
-    "l.34-.0": "5",
-    "l-.32.0": "6",
-    "v-.42[sh]1.7": "7",
-    "c-.13-.0": "8",
-    "l.31-.04c": "9",
-    "l1.0": "A",
+    "c0-.6.0":                         "0",
+    "h-.33":                           "1",
+    "v.42":                            "2",
+    "l.32-.0":                         "3",
+    "v-.86s-":                         "4",
+    "l.34-.0":                         "5",
+    "l-.32.0":                         "6",
+    "v-.42[sh]1.7":                    "7",
+    "c-.13-.0":                        "8",
+    "l.31-.04c":                       "9",
+    "l1.0":                            "A",
     "v-3.58s1,0,1,0c.2,0,.36.04.48.1": "B",
-    "l.35.12": "C",
-    "v-3.58s.92,0,.92,0c.2": "D",
-    "v-3.58s1.92,0,1.92,0": "E",
-    "v-3.58s1.79": "F",
-    "v-.42[hs]1.1": "G",
-    "v-3.58s.36,0,.36,0v1.47s": "H",
-    "v-3.58s.36,0,.36,0v3.58s": "I",
-    "v-3.58h.35v3.58h-.35Z": "I",
-    "l.31-.06c0": "J",
-    "v-3.58s.36,0,.36,0v1.7": "K",
-    "v-3.58h.35v1": "K",
-    "v-3.58s.36,0,.36,0v3.16s": "L",
-    "v-3.58s.54": "M",
-    "v-3.58s.37": "N",
-    "v-3.58h.36": "N",
-    "c0-.61.": "O",
-    "v-3.58s1.01": "P",
-    "c.16.15": "Q",
-    "v-3.58[hs]1.1": "R",
-    "l.33-.0": "S",
-    "v-3.16": "T",
-    "h.35": "U",
-    "l-1.0": "V",
-    "l-.69-3": "W",
-    "v-1.52s": "Y",
-    "v-.44s1": "Z",
+    "l.35.12":                         "C",
+    "v-3.58s.92,0,.92,0c.2":           "D",
+    "v-3.58s1.92,0,1.92,0":            "E",
+    "v-3.58s1.79":                     "F",
+    "v-.42[hs]1.1":                    "G",
+    "v-3.58s.36,0,.36,0v1.47s":        "H",
+    "v-3.58s.36,0,.36,0v3.58s":        "I",
+    "v-3.58h.35v3.58h-.35Z":           "I",
+    "l.31-.06c0":                      "J",
+    "v-3.58s.36,0,.36,0v1.7":          "K",
+    "v-3.58h.35v1":                    "K",
+    "v-3.58s.36,0,.36,0v3.16s":        "L",
+    "v-3.58s.54":                      "M",
+    "v-3.58s.37":                      "N",
+    "v-3.58h.36":                      "N",
+    "c0-.61.":                         "O",
+    "v-3.58s1.01":                     "P",
+    "c.16.15":                         "Q",
+    "v-3.58[hs]1.1":                   "R",
+    "l.33-.0":                         "S",
+    "v-3.16":                          "T",
+    "h.35":                            "U",
+    "l-1.0":                           "V",
+    "l-.69-3":                         "W",
+    "v-1.52s":                         "Y",
+    "v-.44s1":                         "Z"
 }
 
-def replace(line, repl, strg, location):
+def graph2char(line, repl, strg, location):
     """Replace graphics with correct character."""
     ret = re.sub(r' *<path class="cls-1201" d="M.{3,8},.{3,8}' + strg + '.*"/>', repl, line)
     if ret != line:
@@ -56,9 +57,14 @@ def replace(line, repl, strg, location):
             location = [mat.group(1), mat.group(2)]
     return ret, location
 
-def peaks(args):
+def print_continue(text, end, out_file):
+    """Print and reset."""
+    print(text, end=end, file=out_file)
+    return '', '', [0, 0]
+
+def substitute_spans(args):
     """
-    Replace all peaks' graphical representation with names & elevation.
+    Replace all <span/> names
     """
     location = [0, 0]
     svg_out_file = open(args.outfile, 'w')
@@ -66,23 +72,36 @@ def peaks(args):
     bline = '' # backup
     for line0 in open(args.infile, 'r'):
         bline += line0
-        nline, location = replace(line0, "'", "v-.51s.", location)
+        # Graphical peak text
+        nline, location = graph2char(line0, "'", "v-.51s.", location)
         for key in LETTERS:
-            nline, location = replace(nline, LETTERS[key], key, location)
+            nline, location = graph2char(nline, LETTERS[key], key, location)
         if nline != line0:
             oline += nline.rstrip()
             continue
         if len(oline) > 5:
             oline = '<circle class="" cx="' + location[0] + '" cy="' + location[1] + \
-                '" data-name="PEAKN/' + oline + '"/>'
+                '" data-name="PeakName/' + oline + '"/>'
             print(oline, file=svg_out_file)
-            print(nline, end='', file=svg_out_file)
-        else:
-            print(bline, end='', file=svg_out_file)
+            bline, oline, location = print_continue(nline, '', svg_out_file)
+            continue
+        # Real text
+        nline = re.sub(
+            r' *<text class=".{7,8}" transform="translate\(([0-9.]{3,8}) ([0-9.]{3,8})\).*">'
+            r'((?:<tspan .*>([a-z A-Z0-9\-\(’\)]+)</tspan>)+)</text>',
+            '<circle class="" cx="\\1" cy="\\2" data-name="AnyName/\\3',
+            bline
+        )
+        if nline != bline:
+            nline = re.sub(
+                r'<tspan [^>]*>([a-z A-Z0-9\-\(’\)]+)</tspan>', '\\1', nline.rstrip()
+            )
+            if len(nline) - nline.rfind('/') > 4:
+                nline += '"/>'
+                bline, oline, location = print_continue(nline, '\n', svg_out_file)
+                continue
 
-        bline = ''
-        oline = ''
-        location = [0, 0]
+        bline, oline, location = print_continue(bline, '', svg_out_file)
 
 def main():
     """Main method."""
@@ -97,7 +116,7 @@ def main():
     parser.add_argument('-o', '--output', dest='outfile', help='output file name',
                         required=True)
     args = parser.parse_args()
-    peaks(args)
+    substitute_spans(args)
 
 if __name__ == '__main__':
     main()

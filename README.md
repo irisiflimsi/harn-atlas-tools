@@ -22,7 +22,7 @@ information with
 This change graphical letters with real text, which probably don't
 render nice but will be put into the database for later analysis.
 
-> Runtime: Seconds
+> Runtime: 20 seconds
 
 Then
 
@@ -84,6 +84,14 @@ to *xyz_lines*.  This yields a (fake) closed coastline and benefits
 coast and river calculations.  The accuracy of these additional
 insertions is proven for *EPS = 0.006* in the various scripts.
 Changing EPS must take into account.
+
+## Extract Names
+
+This works surprisingly well.
+
+    python geo_pts.py -t xyz -d user:password@dbname:localhost:port
+
+> Runtime: Seconds
 
 ## Elevation
 

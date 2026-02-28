@@ -566,7 +566,7 @@ def main():
         el_a1 = root.find(".//*[@id='A1']")
         if el_a1 is None:
             el_a1 = root.find(".//*[@data-name='A1']")
-        size = Size()
+        size = Size(0, 0, 0, 0)
         print(el_a1)
         size.minx = float(el_a1.attrib.get('x', 0))
         size.miny = float(el_a1.attrib.get('y', 0))
