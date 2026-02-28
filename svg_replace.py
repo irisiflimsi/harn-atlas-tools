@@ -86,20 +86,17 @@ def substitute_spans(args):
             bline, oline, location = print_continue(nline, '', svg_out_file)
             continue
         # Real text
+        nline = re.sub(r'<tspan [^>]*>([a-z A-Z0-9\-\(’\)]+)</tspan>', '\\1', bline)
+        # - rare occasion of tspan in tspan
+        nline = re.sub(r'<tspan [^>]*>([a-z A-Z0-9\-\(’\)]+)</tspan>', '\\1', nline).rstrip()
         nline = re.sub(
-            r' *<text class=".{7,8}" transform="translate\(([0-9.]{3,8}) ([0-9.]{3,8})\).*">'
-            r'((?:<tspan .*>([a-z A-Z0-9\-\(’\)]+)</tspan>)+)</text>',
-            '<circle class="" cx="\\1" cy="\\2" data-name="AnyName/\\3',
-            bline
+            r' *<text .*translate\(([0-9.]{3,8}) ([0-9.]{3,8})\).*>([a-z A-Z0-9\-\(’\)]+)</text>',
+            '<circle class="" cx="\\1" cy="\\2" data-name="AnyName/\\3"/>',
+            nline
         )
-        if nline != bline:
-            nline = re.sub(
-                r'<tspan [^>]*>([a-z A-Z0-9\-\(’\)]+)</tspan>', '\\1', nline.rstrip()
-            )
-            if len(nline) - nline.rfind('/') > 4:
-                nline += '"/>'
-                bline, oline, location = print_continue(nline, '\n', svg_out_file)
-                continue
+        if nline != bline.rstrip():
+            bline, oline, location = print_continue(nline, '\n', svg_out_file)
+            continue
 
         bline, oline, location = print_continue(bline, '', svg_out_file)
 

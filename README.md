@@ -91,7 +91,7 @@ This works surprisingly well.
 
     python geo_pts.py -t xyz -d user:password@dbname:localhost:port
 
-> Runtime: Seconds
+> Runtime: less than 1 minute
 
 ## Elevation
 
