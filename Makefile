@@ -25,8 +25,9 @@ ah_polys.json:
 ah_pts.json:
 	ogr2ogr -f GeoJSON -s_srs kethira-sin30w.wkt -t_srs kethira-sphere.wkt ah_pts.json $(db) xyz_pts
 
-xyz_lines.json xyz_polys.json xyz_pts.json:
-	python svg2geo.py -i $(svg) -o xyz.json
+xyz_lines.json xyz_polys.json xyz_pts.json transformed.svg:
+	python svg_replace.py -i $(svg) -o transformed.svg
+	python svg2geo.py -i transformed.svg -o xyz.json
 
 setup: postgis xyz_lines.json xyz_polys.json xyz_pts.json
 	docker exec harn-atlas-tools-db-1 psql postgresql://user:password@localhost:5432/dbname\
@@ -42,12 +43,14 @@ setup: postgis xyz_lines.json xyz_polys.json xyz_pts.json
 	 -c "SELECT UpdateGeometrySRID('xyz_lines','wkb_geometry',0)"\
 	 -c "SELECT UpdateGeometrySRID('xyz_polys','wkb_geometry',0)"\
 	 -c "SELECT UpdateGeometrySRID('xyz_pts','wkb_geometry',0)"
+        python geo_pts.py -t xyz -d $(creds)
 	python geo_elevation.py -t xyz -d $(creds)
 	python geo_coast.py -t xyz -d $(creds)
 	python geo_lakes.py -t xyz -d $(creds)
 	python geo_roads.py -t xyz -d $(creds)
 	python geo_vegetation.py -t xyz -d $(creds)
 	python geo_rivers.py -t xyz -d $(creds)
+        python geo_height.py -v -t xyz -g -16.70 -16.50 40.35 40.55 -d $(creds)
 
 clean:
 	rm -f xyz_lines.json xyz_polys.json xyz_pts.json

@@ -106,10 +106,10 @@ def handle_partitions(args, cursor, partitions, pts):
 
 def create_raster(args, cursor):
     """Iterate over all heights and create a raster elevation field"""
-    ptx1 = -16.7
-    ptx2 = -16.5
-    pty1 = 40.35
-    pty2 = 40.55
+    ptx1 = args.ptx1
+    ptx2 = args.ptx2
+    pty1 = args.pty1
+    pty2 = args.pty2
     ra_w = int((ptx2 - ptx1) * RSCALE)
     ra_h = int((pty2 - pty1) * RSCALE)
     matrix = numpy.full((ra_h, ra_w), 65535, numpy.float32)
@@ -150,10 +150,13 @@ def main():
         help='db to connect to user:password@dbname:host:port')
     parser.add_argument(
         '-t', '--table', dest='table', required=True,
-        help='table prefix; _pts and _lines will be added')
+        help='table prefix; _pts, _polys, and _lines will be added')
     parser.add_argument(
         '-v', '--verbose', action='store_true',
         help='verbose', required=False)
+    parser.add_argument(
+        '-g', '--geo', dest='geo',
+        help='four (decimal) geo coordinates: lon1 lon2 lat1 lat2', nargs=4, required=False)
     args = parser.parse_args()
 
     conn = psycopg2.connect(

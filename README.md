@@ -204,21 +204,10 @@ depending on the orientation of the linestring.
 
 ## Elevation field
 
-The DB currently only contains peaks as such.  The following script
-uses proximity of the text before with a peak to label and associate a
-height.
-
-    python geo_pts.py -t xyz -d user:password@dbname:host:port
-
-This will later be used to interpolate elevations from these peaks and
-the elevation lines.
-
-> Runtime: Seconds
-
 The next step is a a computationally more involved process.
 Interpolation is not trivial and needs some *numerical stability*.
 
-    python geo_height.py -v -t xyz -d user:password@dbname:localhost:25432
+    python geo_height.py -v -t xyz -g -16.70 -16.50 40.35 40.55 -d user:password@dbname:localhost:25432
 
 The script creates an elevation field called *all.tif*.
 
