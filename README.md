@@ -207,15 +207,16 @@ depending on the orientation of the linestring.
 The next step is a a computationally more involved process.
 Interpolation is not trivial and needs some *numerical stability*.
 
-    python geo_height.py -v -t xyz -g -16.70 -16.50 40.35 40.55 -d user:password@dbname:localhost:25432
+    python geo_height.py -v -t xyz -g -16.70 -16.50 40.35 40.55 -H 32 -d user:password@dbname:localhost:25432
 
-The script creates an elevation field called *all.tif*.
+The script creates an elevation field called *all.tif*.  The *--geo*
+option takes for geo coordinates, the above example is arbitrary, but
+relevant for the time the script takes. The *--hscale* option maps the
+map elevations given in feet to the out band of *all.tif* and should
+logically by be about 1/3.  I found 32 to be useful for debugging.
 
-The area is hard-coded as [-16.7,-16.5] x [40.35, 40.55].  With a
-scale of 50m x 50m pixels (also hard-coded), this takes just over 4
-minutes. (See the script for the also hard-coded height-scale.)
+Currently a scale of 50m x 50m pixels is hard-coded, this takes just
+over 11 minutes for the example above.  At this scale all of Harn (10 x
+15) we can expect roughly 30 full 24h-days of straight calculation.
 
-At this scale all of Harn (10 x 15) we can expect roughly 10 full
-24h-days of straight calculation.
-
-> Runtime: 4:10 minutes
+> Runtime: 12 minutes

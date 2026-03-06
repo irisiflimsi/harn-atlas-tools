@@ -55,18 +55,23 @@ def get_partitions(args, cursor, pts):
         level += 1
     return partitions
 
-def calc_bary(pts):
+def calc_bary(pts, mesa, diam):
     """Calculate barycentric elevation."""
-    # SUM_i (hi/di) / SUM_j (1/dj), numerically stablized
-    # SUM_i (hi / (1 + SUM_{i!=j} (di/dj)))
     pzz = 0
-    for i, pti in enumerate(pts):
-        pzzin = int(pti[0])
-        pzzid = 1
-        for j, ptj in enumerate(pts):
-            if i != j:
-                pzzid += pti[1] / ptj[1]
-        pzz += pzzin / pzzid
+    if mesa:
+        # There is only the mesa boundary with diameter diam.  The
+        # addition is bound by (1/2)/(1 + 1/2) = 1/3 => 333ft
+        pzz = int(pts[0][0]) + 1000*(pts[0][1]/diam) / (1 + (pts[0][1]/diam))
+    else:
+        # SUM_i (hi/di) / SUM_j (1/dj), numerically stablized
+        # SUM_i (hi / (1 + SUM_{i!=j} (di/dj)))
+        for i, pti in enumerate(pts):
+            pzzin = int(pti[0])
+            pzzid = 1
+            for j, ptj in enumerate(pts):
+                if i != j:
+                    pzzid += pti[1] / ptj[1]
+            pzz += pzzin / pzzid
     return pzz
 
 def handle_partitions(args, cursor, partitions, pts):
@@ -75,11 +80,13 @@ def handle_partitions(args, cursor, partitions, pts):
     for partition in reversed(partitions):
         for pline in partition:
             cursor.execute(f"""
-              SELECT ST_Covers(wkb_geometry,  ST_GeomFromText('POINT({pts[0]} {pts[1]})'))
+              SELECT ST_Covers(wkb_geometry, ST_GeomFromText('POINT({pts[0]} {pts[1]})')),
+                ST_MaxDistance(wkb_geometry, wkb_geometry)
               FROM {args.table}_polys
               WHERE id = {pline['base']}
             """)
-            if cursor.fetchall()[0][0]:
+            result = cursor.fetchall()[0]
+            if result[0]:
                 peak_c = f"id IN ({','.join([str(p) for p in pline['peaks']])})"
                 if peak_c.endswith('()'):
                     peak_c = "FALSE"
@@ -97,19 +104,16 @@ def handle_partitions(args, cursor, partitions, pts):
                   FROM {args.table}_polys AS line
                   WHERE id = {pline['base']} OR {hole_c}
                 """)
-                # Mapping of 2000ft to 64000 for simplicity.
-                # Logically, a 2D pixel unit is 50m (see above), so for
-                # the vertical unit the factor for pzz (in ft) should
-                # be 1 / 3ft/m / 50m.
-                return calc_bary(cursor.fetchall()) * 32
+                mesa = (peak_c == "FALSE") and (hole_c == "FALSE")
+                return calc_bary(cursor.fetchall(), mesa, result[1]) * float(args.hscale)
     return 0
 
 def create_raster(args, cursor):
     """Iterate over all heights and create a raster elevation field"""
-    ptx1 = args.ptx1
-    ptx2 = args.ptx2
-    pty1 = args.pty1
-    pty2 = args.pty2
+    ptx1 = float(args.geo[0])
+    ptx2 = float(args.geo[1])
+    pty1 = float(args.geo[2])
+    pty2 = float(args.geo[3])
     ra_w = int((ptx2 - ptx1) * RSCALE)
     ra_h = int((pty2 - pty1) * RSCALE)
     matrix = numpy.full((ra_h, ra_w), 65535, numpy.float32)
@@ -157,6 +161,9 @@ def main():
     parser.add_argument(
         '-g', '--geo', dest='geo',
         help='four (decimal) geo coordinates: lon1 lon2 lat1 lat2', nargs=4, required=False)
+    parser.add_argument(
+        '-H', '--hscale', dest='hscale',
+        help='float scale for db ft to out band value', required=True)
     args = parser.parse_args()
 
     conn = psycopg2.connect(
