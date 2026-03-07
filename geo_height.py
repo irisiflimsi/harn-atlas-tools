@@ -55,10 +55,10 @@ def get_partitions(args, cursor, pts):
         level += 1
     return partitions
 
-def calc_bary(pts, mesa, diam):
+def calc_bary(pts, diam):
     """Calculate barycentric elevation."""
     pzz = 0
-    if mesa:
+    if diam > 0:
         # There is only the mesa boundary with diameter diam.  The
         # addition is bound by (1/2)/(1 + 1/2) = 1/3 => 333ft
         pzz = int(pts[0][0]) + 1000*(pts[0][1]/diam) / (1 + (pts[0][1]/diam))
@@ -80,8 +80,7 @@ def handle_partitions(args, cursor, partitions, pts):
     for partition in reversed(partitions):
         for pline in partition:
             cursor.execute(f"""
-              SELECT ST_Covers(wkb_geometry, ST_GeomFromText('POINT({pts[0]} {pts[1]})')),
-                ST_MaxDistance(wkb_geometry, wkb_geometry)
+              SELECT ST_Covers(wkb_geometry, ST_GeomFromText('POINT({pts[0]} {pts[1]})'))
               FROM {args.table}_polys
               WHERE id = {pline['base']}
             """)
@@ -93,6 +92,14 @@ def handle_partitions(args, cursor, partitions, pts):
                 hole_c = f"id IN ({','.join([str(p) for p in pline['holes']])})"
                 if hole_c.endswith('()'):
                     hole_c = "FALSE"
+                diam = 0
+                if (peak_c == "FALSE") and (hole_c == "FALSE"):
+                    cursor.execute(f"""
+                      SELECT ST_MaxDistance(wkb_geometry, wkb_geometry)
+                      FROM {args.table}_polys
+                      WHERE id = {pline['base']}
+                    """)
+                    diam = float(cursor.fetchall()[0][0])
                 cursor.execute(f"""
                   SELECT peak.svgid,
                     ST_Distance(ST_GeomFromText('POINT({pts[0]} {pts[1]})'), peak.wkb_geometry)
@@ -104,8 +111,7 @@ def handle_partitions(args, cursor, partitions, pts):
                   FROM {args.table}_polys AS line
                   WHERE id = {pline['base']} OR {hole_c}
                 """)
-                mesa = (peak_c == "FALSE") and (hole_c == "FALSE")
-                return calc_bary(cursor.fetchall(), mesa, result[1]) * float(args.hscale)
+                return calc_bary(cursor.fetchall(), diam) * float(args.hscale)
     return 0
 
 def create_raster(args, cursor):

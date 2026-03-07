@@ -216,7 +216,7 @@ map elevations given in feet to the out band of *all.tif* and should
 logically by be about 1/3.  I found 32 to be useful for debugging.
 
 Currently a scale of 50m x 50m pixels is hard-coded, this takes just
-over 11 minutes for the example above.  At this scale all of Harn (10 x
-15) we can expect roughly 30 full 24h-days of straight calculation.
+over 4 minutes for the example above.  At this scale all of Harn (10 x
+15) we can expect roughly 10 full 24h-days of straight calculation.
 
-> Runtime: 12 minutes
+> Runtime: 4 minutes
