@@ -6,6 +6,11 @@ import argparse
 import sys
 import psycopg2
 
+# Distance of name from (intended) POI
+EPS = 0.04
+# Distance for duplicates
+EPSD = 0.001
+
 def obtain_names(args, cursor):
     """Associate names to peaks"""
     cursor.execute(f"""
@@ -43,11 +48,12 @@ def obtain_names(args, cursor):
         SELECT t1.id AS t1id, substring(t2.name from 10) AS t2name, dist FROM {args.table}_pts AS t1,
         LATERAL (
           SELECT t3.name AS name, ST_Distance(t1.wkb_geometry, t3.wkb_geometry) AS dist
-          FROM {args.table}_pts AS t3 WHERE t3.name LIKE '%PeakName%'
-          ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry) LIMIT 1
+          FROM {args.table}_pts AS t3 WHERE regexp_like(t3.name, 'PeakName/[A-Z]')
+          ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry)
+          LIMIT 1
         )
         AS t2
-        WHERE t1.type = 'PEAK' AND dist < 0.03 ORDER BY dist DESC
+        WHERE t1.type = 'PEAK' AND dist < {EPS} ORDER BY dist DESC
       )
     """)
     for row in cursor.fetchall():
@@ -65,7 +71,7 @@ def obtain_names(args, cursor):
         SELECT t1.id AS t1id, substring(t2.name from 9) AS t2name, dist FROM {args.table}_pts AS t1,
         LATERAL (
           SELECT t3.name AS name, ST_Distance(t1.wkb_geometry, t3.wkb_geometry) AS dist
-          FROM {args.table}_pts AS t3 WHERE t3.name LIKE '%AnyName%'
+          FROM {args.table}_pts AS t3 WHERE regexp_like(t3.name, 'AnyName/[A-Z]')
           ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry) LIMIT 1
         )
         AS t2
@@ -94,7 +100,7 @@ def obtain_names(args, cursor):
             t1.type = 'Tunnel' OR
             t1.type = 'Waterfall'
           )
-          AND dist < 0.03 AND (t1.name = '' OR t1.name = '-')
+          AND dist < {EPS} AND (t1.name = '' OR t1.name = '-')
         ORDER BY dist DESC
       )
     """)
@@ -106,11 +112,40 @@ def obtain_names(args, cursor):
           WHERE id = {row[0]}
         """)
 
-    # Remaining
+def duplicate_nonames(args, cursor):
+    """Delete clear, but unnamed duplicates."""
+    print("Delete unnamed duplicates")
     cursor.execute(f"""
-      SELECT count(*) FROM {args.table}_pts WHERE name = '-'
+      DELETE FROM {args.table}_pts AS t0 USING (
+        SELECT t1.id FROM {args.table}_pts AS t1, {args.table}_pts AS t2
+        WHERE t1.id <> t2.id AND ST_Distance(t1.wkb_geometry, t2.wkb_geometry) < {EPSD}
+          AND t1.name = '-' AND t2.name <> '-'
+      ) AS t1 (id)
+      WHERE t0.id = t1.id
     """)
-    print(f"Remaining nnamed points...{cursor.fetchall()[0][0]}")
+
+def do_specials(args, cursor):
+    """Manually detected."""
+    cursor.execute(f"""
+      UPDATE {args.table}_pts SET name = 'Varazal''s Wall'
+      WHERE (type = '/CITIES/Kaldor/-' OR type = '/TYPE/Chybisa/-') AND
+        ST_Covers(
+          ST_Envelope(
+            ST_Union('POINT(-17.218 44.033)'::geometry, 'POINT(-17.181 43.909)'::geometry)
+          ),
+          wkb_geometry
+        )
+    """)
+    cursor.execute(f"""
+      UPDATE {args.table}_pts SET name = 'Maguda Falls', svgid = 120
+      WHERE (type = '/TYPE/Rethem/-') AND
+        ST_Covers(
+          ST_Envelope(
+            ST_Union('POINT(-25.154 44.766)'::geometry, 'POINT(-25.142 44.751)'::geometry)
+          ),
+          wkb_geometry
+        )
+    """)
 
 def main():
     """Main method."""
@@ -137,6 +172,15 @@ def main():
     cursor = conn.cursor()
 
     obtain_names(args, cursor)
+    duplicate_nonames(args, cursor)
+    do_specials(args, cursor)
+
+    # Remaining
+    cursor.execute(f"""
+      SELECT count(*) FROM {args.table}_pts WHERE name = '-'
+    """)
+    print(f"Remaining unnamed points...{cursor.fetchall()[0][0]}")
+
     conn.commit()
 
 if __name__ == '__main__':

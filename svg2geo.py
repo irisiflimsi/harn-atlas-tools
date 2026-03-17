@@ -417,7 +417,10 @@ def parse_symbol(args, elem):
         print(f"parsing {elem.tag} with id={elem.attrib.get('id', '')} " + \
               f"and data-name={elem.attrib.get('data-name', '')}")
     if elem.attrib.get('id', '-') != '-':
-        SYMBOLS[elem.attrib.get('id', '')] = get_data_name(elem)
+        sid = elem.attrib.get('id', '')
+        if sid == 'Tollbooth-2':
+            sid = 'Tollbooth'
+        SYMBOLS[sid] = get_data_name(elem)
 
 def parse_style(args, text):
     """Parse all styles. Poor man's parsing."""
