@@ -48,7 +48,9 @@ def obtain_names(args, cursor):
         SELECT t1.id AS t1id, substring(t2.name from 10) AS t2name, dist FROM {args.table}_pts AS t1,
         LATERAL (
           SELECT t3.name AS name, ST_Distance(t1.wkb_geometry, t3.wkb_geometry) AS dist
-          FROM {args.table}_pts AS t3 WHERE regexp_like(t3.name, 'PeakName/[A-Z]')
+          FROM {args.table}_pts AS t3
+          WHERE regexp_like(t3.name, 'PeakName/') AND
+            NOT (t3.name LIKE '%000' OR t3.name LIKE '%500')
           ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry)
           LIMIT 1
         )
@@ -71,7 +73,9 @@ def obtain_names(args, cursor):
         SELECT t1.id AS t1id, substring(t2.name from 9) AS t2name, dist FROM {args.table}_pts AS t1,
         LATERAL (
           SELECT t3.name AS name, ST_Distance(t1.wkb_geometry, t3.wkb_geometry) AS dist
-          FROM {args.table}_pts AS t3 WHERE regexp_like(t3.name, 'AnyName/[A-Z]')
+          FROM {args.table}_pts AS t3
+          WHERE regexp_like(t3.name, 'AnyName/') AND
+            NOT (t3.name LIKE '%000' OR t3.name LIKE '%500')
           ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry) LIMIT 1
         )
         AS t2
