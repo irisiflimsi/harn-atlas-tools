@@ -1,0 +1,17 @@
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000001, '/COASTLINE/tmp', 'LINESTRING(-16.858 45.999,-16.858 47.000,-19.993 48.923)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000002, '/COASTLINE/tmp', 'LINESTRING(-21.348 48.928,-21.342 48.721,-21.452 48.807)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000003, '/COASTLINE/tmp', 'LINESTRING(-21.585 48.770,-22.884 47.523)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000004, '/COASTLINE/tmp', 'LINESTRING(-24.113 47.308,-26.322 45.014)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000005, '/COASTLINE/tmp', 'LINESTRING(-25.299 43.985,-25.634 42.058)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000006, '/COASTLINE/tmp', 'LINESTRING(-24.340 42.057,-19.809 43.999)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000007, '/COASTLINE/tmp', 'LINESTRING(-25.787 45.014,-25.780 45.014)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000008, '/COASTLINE/tmp', 'LINESTRING(-20.000 44.504,-20.000 44.513)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000009, '/COASTLINE/tmp', 'LINESTRING(-20.000 46.233,-20.000 46.245)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000010, '/COASTLINE/tmp', 'LINESTRING(-20.000 46.568,-20.000 46.575)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000011, '/COASTLINE/tmp', 'LINESTRING(-19.702 46.999,-19.694 46.999)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000012, '/COASTLINE/tmp', 'LINESTRING(-19.645 44.000,-19.497 44.000)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000013, '/COASTLINE/tmp', 'LINESTRING(-16.664 44.002,-17.193 43.574,-17.002 42.951)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000014, '/COASTLINE/tmp', 'LINESTRING(-19.653 44.000,-19.644 44.000)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000015, '/COASTLINE/tmp', 'LINESTRING(-18.314 43.000,-18.308 43.000)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000016, '/COASTLINE/tmp', 'LINESTRING(-18.022 47.000,-18.018 47.000)'::geometry);
+INSERT INTO xyz_lines (id, type, wkb_geometry) VALUES (1000017, '/COASTLINE/tmp', 'LINESTRING(-20.000 45.685,-20.000 45.680)'::geometry);

@@ -77,7 +77,7 @@ def sort_elevation_pts(table, cursor):
       SELECT substring(type, '[^1-9]([1-9][05]|5)00') AS elev,
         ST_Union(wkb_geometry)
       FROM {table}
-      WHERE type LIKE '%00%'
+      WHERE type LIKE '%500%' OR type LIKE '%000%'
       GROUP BY elev
     """)
     points = cursor.fetchall()
