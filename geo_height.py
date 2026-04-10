@@ -10,7 +10,7 @@ import numpy
 
 # (One over) Width of raster pixel in degrees.  Since 1 degree is
 # roughly 100km, 100m is roughly 1/1000 degrees.
-RSCALE = 2000 # 50m pixels
+RSCALE = 250 # 400m pixels
 
 def get_partitions(args, cursor, pts):
     """Get partition of covered area."""
@@ -116,33 +116,48 @@ def handle_partitions(args, cursor, partitions, pts):
 
 def create_raster(args, cursor):
     """Iterate over all heights and create a raster elevation field"""
-    ptx1 = float(args.geo[0])
-    ptx2 = float(args.geo[1])
-    pty1 = float(args.geo[2])
-    pty2 = float(args.geo[3])
-    ra_w = int((ptx2 - ptx1) * RSCALE)
-    ra_h = int((pty2 - pty1) * RSCALE)
-    matrix = numpy.full((ra_h, ra_w), 65535, numpy.float32)
-    raster = rasterio.open(
-        "all.tif", height=ra_h, width=ra_w, driver="GTiff",
-        count=1, nodata=65535, dtype='uint16', crs=None, mode="w",
-        transform=rasterio.transform.Affine(1/RSCALE, 0, ptx1, 0, 1/RSCALE, pty1, 0, 0, 1)
-    )
+    pt_lon = int(args.geo[0])
+    pt_lat = int(args.geo[1])
+    tb_id = 1000 * pt_lon + pt_lat
+    matrix = numpy.full((RSCALE, RSCALE), 65535, numpy.float32)
 
-    partitions = get_partitions(args, cursor, [ptx1, pty1, ptx2, pty2])
-
-    ptx = ptx1
+    partitions = get_partitions(args, cursor, [pt_lon, pt_lat, pt_lon + 1, pt_lat + 1])
+    pt_x = pt_lon
     ra_x = 0
-    while ra_x < ra_w:
-        verbosity(args.verbose, f"longitude at {ptx}")
-        pty = pty1
+    while ra_x < RSCALE:
+        verbosity(args.verbose, f"longitude at {pt_x}")
+        pt_y = pt_lat
         ra_y = 0
-        while ra_y < ra_h:
-            matrix[ra_y][ra_x] = handle_partitions(args, cursor, partitions, [ptx, pty])
-            pty += 1 / RSCALE
+        while ra_y < RSCALE:
+            matrix[ra_y][ra_x] = handle_partitions(args, cursor, partitions, [pt_x, pt_y])
+            pt_y += 1 / RSCALE
             ra_y += 1
-        ptx += 1 / RSCALE
+        pt_x += 1 / RSCALE
         ra_x += 1
+
+    cursor.execute(f"""
+      INSERT INTO xyz_heights (id, raster)
+      SELECT {tb_id},
+        ST_SetValues(
+          ST_AddBand(
+            ST_MakeEmptyRaster(
+              {RSCALE}, {RSCALE},
+              {pt_lon}, {pt_lat}, {1 / RSCALE}, {1 / RSCALE},
+              0, 0
+            ),
+            '16BUI'::TEXT, 65535, 65535
+          ),
+          1, 1, 1, ARRAY{numpy.array2string(matrix, separator=",", threshold=numpy.inf)}::double precision[][]
+        )
+    """)
+
+def write_geotiff(tb_id, pt_lon, pt_lat, matrix):
+    """Write the raster into a GeoTIFF. Not used currently."""
+    raster = rasterio.open(
+        f"height{tb_id}.tif", height=RSCALE, width=RSCALE, driver="GTiff",
+        count=1, nodata=65535, dtype='uint16', crs=None, mode="w",
+        transform=rasterio.transform.Affine(1/RSCALE, 0, pt_lon, 0, 1/RSCALE, pt_lat, 0, 0, 1)
+    )
     raster.write(matrix, 1)
 
 def verbosity(verb, out):
@@ -166,7 +181,7 @@ def main():
         help='verbose', required=False)
     parser.add_argument(
         '-g', '--geo', dest='geo',
-        help='four (decimal) geo coordinates: lon1 lon2 lat1 lat2', nargs=4, required=False)
+        help='two (integer) geo coordinates: lon1 lat1', nargs=2, required=False)
     parser.add_argument(
         '-H', '--hscale', dest='hscale',
         help='float scale for db ft to out band value', required=True)
@@ -181,7 +196,15 @@ def main():
     cursor = conn.cursor()
 
     # Initialize
+    cursor.execute(f"""
+      CREATE TEMP SEQUENCE IF NOT EXISTS serial START 600000;
+      CREATE TABLE IF NOT EXISTS xyz_heights (id integer primary key, raster raster);
+      CREATE INDEX IF NOT EXISTS xyz_heights_raster_idx ON xyz_heights
+        USING GIST(ST_Envelope(raster));
+    """)
+    # Constraints? SELECT AddRasterConstraints('xyz_heights'::name, 'raster'::name, ...);
     create_raster(args, cursor)
+    conn.commit()
 
 if __name__ == '__main__':
     main()

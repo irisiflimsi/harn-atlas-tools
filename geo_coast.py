@@ -289,6 +289,13 @@ def execute(args, cursor):
     """)
 
     cursor.execute(f"""
+      INSERT INTO {args.table}_polys (id, name, type, wkb_geometry)
+      SELECT nextval('serial'), name, type, ST_MakePolygon(wkb_geometry)
+      FROM {args.table}_lines
+      WHERE type = '0'
+    """)
+
+    cursor.execute(f"""
       SELECT count(*) FROM {args.table}_lines WHERE type LIKE '%COASTLINE%'
     """)
     print(f"Remaining lines: {cursor.fetchall()[0][0]}")

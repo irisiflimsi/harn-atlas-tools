@@ -192,16 +192,20 @@ depending on the orientation of the linestring.
 The next step is a a computationally more involved process.
 Interpolation is not trivial and needs some *numerical stability*.
 
-    python geo_height.py -v -t xyz -g -16.70 -16.50 40.35 40.55 -H 32 -d user:password@dbname:localhost:25432
+    python geo_height.py -v -t xyz -g -16 40 -H 32 -d user:password@dbname:localhost:25432
 
 The script creates an elevation field called *all.tif*.  The *--geo*
-option takes for geo coordinates, the above example is arbitrary, but
-relevant for the time the script takes. The *--hscale* option maps the
-map elevations given in feet to the out band of *all.tif* and should
-logically by be about 1/3.  I found 32 to be useful for debugging.
+option takes *lon* and *lat* coordinates, the above example is
+arbitrary, but relevant for the time the script takes. The *--hscale*
+option maps the map elevations given in feet to the out band and
+should logically by be about 1/3.  I found 32 to be useful for
+debugging.  This version dumps all elevation raster fields into the
+table *..._heights* of the db.
 
-Currently a scale of 50m x 50m pixels is hard-coded, this takes just
-over 4 minutes for the example above.  At this scale all of Harn (10 x
-15) we can expect roughly 10 full 24h-days of straight calculation.
+Currently a scale of 400m x 400m pixels is hard-coded, this takes a
+couple of minutes on Melderyn.  Note that the geo coordinates take
+only integer degrees and a run covers only a 1x1 "degree square".  The
+runtime heavily depends on the density of elevation features in it, so
+no meaningful runtime estimate can be given.
 
-> Runtime: 4 minutes
+> Runtime: a few minutes

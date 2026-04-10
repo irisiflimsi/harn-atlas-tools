@@ -42,7 +42,7 @@ def obtain_names(args, cursor):
 
     print("Label peaks")
     cursor.execute(f"""
-      SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') FROM 2)),
+      SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') from 2)),
         ltrim(t2name,'A''BCDEFGHIJKLMNOPQRSTUVWXYZ')
       FROM (
         SELECT t1.id AS t1id, substring(t2.name from 10) AS t2name, dist FROM {args.table}_pts AS t1,
@@ -68,7 +68,8 @@ def obtain_names(args, cursor):
 
     print("Label typed")
     cursor.execute(f"""
-      SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') FROM 2))
+      SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') from 2)),
+        ltrim(t2name,'A''BCDEFGHIJKLMNOPQRSTUVWXYZ')
       FROM (
         SELECT t1.id AS t1id, substring(t2.name from 9) AS t2name, dist FROM {args.table}_pts AS t1,
         LATERAL (
@@ -112,7 +113,7 @@ def obtain_names(args, cursor):
         row1 = row[1].replace("'", "''")
         cursor.execute(f"""
           UPDATE {args.table}_pts
-          SET name = '{row1}'
+          SET name = '{row1}', svgid = '{row[2]}'
           WHERE id = {row[0]}
         """)
 
