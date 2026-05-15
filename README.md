@@ -181,11 +181,12 @@ otherwise.
 Determines rivers from shores to springs in iterations.  Rivers are
 created with type *River/n/Mouth:vertex*, where *n* is the level (from
 0 at the coast) of detection and *vertex* is *start* or *end*,
-depending on the orientation of the linestring.
+depending on the orientation of the linestring.  It includes
+directionless lake connectivity, but with level.
 
     python geo_rivers.py -t xyz -d user:password@dbname:host:port
 
-> Runtime: 45 minutes
+> Runtime: 6 minutes
 
 ## Elevation field
 

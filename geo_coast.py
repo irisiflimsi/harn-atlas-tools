@@ -142,7 +142,7 @@ def encircle(args, cursor, isle_id):
         """)
         print(f"- new area river: {cursor.fetchall()[0][0]}")
         cursor.execute(f"""
-            DELETE FROM {args.table}_lines WHERE id = {river[0]}
+          DELETE FROM {args.table}_lines WHERE id = {river[0]}
         """)
 
 def execute(args, cursor):
@@ -289,13 +289,6 @@ def execute(args, cursor):
     """)
 
     cursor.execute(f"""
-      INSERT INTO {args.table}_polys (id, name, type, wkb_geometry)
-      SELECT nextval('serial'), name, type, ST_MakePolygon(wkb_geometry)
-      FROM {args.table}_lines
-      WHERE type = '0'
-    """)
-
-    cursor.execute(f"""
       SELECT count(*) FROM {args.table}_lines WHERE type LIKE '%COASTLINE%'
     """)
     print(f"Remaining lines: {cursor.fetchall()[0][0]}")
@@ -345,7 +338,8 @@ def test_harnmain(args, cursor):
     """Test the pecularities of harn main."""
     # Priming test DB
     cursor.execute(f"""
-      DELETE FROM {args.table}_lines
+      DELETE FROM {args.table}_lines;
+      DELETE FROM {args.table}_polys
     """)
     # Connected river inlet 1
     cursor.execute(f"""

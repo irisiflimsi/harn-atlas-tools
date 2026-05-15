@@ -6,247 +6,333 @@ import sys
 import argparse
 import psycopg2
 
-# This is used as a GAP measure to connect non-connected river
-# endpoints or lakes; if the distance is smaller than twice this, then
-# we assume rivers and lakes were meant to be connected although they
-# aren't in the original and the coastal approximation.  Note that
-# previous approximations may separate some water entities more.
+# This is used as a gap measure to connect river endpoints or lakes;
+# if the distance is smaller than twice this, we assume rivers and
+# lakes were meant as connected.
 EPS = 0.005 # roughly 0.005 x 100km = 500m
 
-# This is to work around a deficiency in CG_ApproximatedMedialAxis and
-# can be chosen arbitrarily small.
-DEL = 0.0001
+def verbosity(verb, out):
+    """Verbosity."""
+    if verb:
+        print(out)
 
 def make_axis(verbose, table, cursor, bound):
     """Removes the protuding segments from the straight skeleton."""
-    if verbose:
-        print(f"- Create axis for {bound[0]}")
+    verbosity(verbose, f"- Create axis for {bound[0]}")
+
+    # This removes the "stingers", unfortunately a few connectors as well
     cursor.execute(f"""
-      SELECT geo FROM (
+      SELECT ST_AsText(geo) FROM (
         SELECT (
-          ST_Dump(ST_LineMerge(CG_ApproximateMedialAxis(ST_Buffer(geo, -{DEL}))))
+          ST_Dump(ST_LineMerge(CG_ApproximateMedialAxis(ST_MakePolygon('{bound[1]}'::geometry))))
         ).geom
-        AS geo FROM (
-          SELECT geo FROM (
-            SELECT (
-              ST_Dump(
-                ST_CollectionExtract(ST_Polygonize(ST_Node('{bound[1]}'::geometry)), 3)
-              )
-            ).geom
-            AS geo
-          )
-          ORDER BY ST_Perimeter(geo) DESC LIMIT 1
-        )
+        AS geo
       )
       WHERE ST_Length(geo) > {EPS}
     """)
-    merge = cursor.fetchall()
-    if len(merge) > 1:
-        print(f"Look for artifacts near {bound[0]} with {len(merge)} replacement lines")
-    for axis in merge:
+    merge = list(cursor.fetchall())
+
+    # Bring the connectors back in
+    while len(merge) > 1:
+        dist = [1 + 2*EPS, 0]
+        for idx in range(1, len(merge)):
+            cursor.execute(f"""
+              SELECT ST_Distance('{merge[0][0]}'::geometry, '{merge[idx][0]}'::geometry)
+            """)
+            test = cursor.fetchall()[0][0]
+            if test < dist[0]:
+                dist = [test, idx]
+        if len(merge) % 100 == 99:
+            print(f"- - Long loop: {len(merge) + 1}")
+        cursor.execute(f"""
+          SELECT ST_AsText(ST_LineMerge(ST_Union(
+            ARRAY[
+              '{merge[0][0]}'::geometry, '{merge[dist[1]][0]}'::geometry,
+              ST_ShortestLine('{merge[0][0]}'::geometry, '{merge[dist[1]][0]}'::geometry)
+            ]
+          )))
+        """)
+        merge[dist[1]] = cursor.fetchall()[0]
+        merge.pop(0)
+
+    # Some of the "basin" river trees are from a single polygon.
+    if len(merge) > 0: # = 1
+        if "MULTILINESTRING" in merge[0][0]:
+            cursor.execute(f"SELECT ST_AsText((ST_Dump('{merge[0][0]}'::geometry)).geom)")
+            merge = cursor.fetchall()
+        if len(merge) > 1:
+            verbosity(verbose, f"- - {len(merge)} axis'")
+    for line in merge:
         cursor.execute(f"""
           INSERT INTO {table} (id, name, type, wkb_geometry)
-          VALUES (
-            nextval('serial'), 'candidate', 'STREAMS',
-            '{axis[0]}'::geometry
-          )
+          VALUES (nextval('serial'), 'candidate', 'STREAMS', '{line[0]}'::geometry)
         """)
+    if len(merge) == 0:
+        print(f"- Can't create axis for {bound[0]}")
 
-def handle_lakes(args, cursor, level):
-    """Find lakes connected to n-removed river.  Consider as n+1-removed
-    rivers to those lakes.
+def split_basin_river(verbose, table, cursor, river):
+    """Removes Arain and Tontury from area rivers, adding more river sections in the process."""
+    verbosity(verbose, f"- Remove lakes from {river[0]}")
+    # The medial axis isn't efficient, therefore we cut this into pieces.
+    blade = """
+      ST_Collect(
+        ARRAY[
+          'LINESTRING(-17.924 46.191, -17.845 46.168, -17.910 46.122, -17.924 46.191)'::geometry,
+          'LINESTRING(-18.560 45.645, -18.498 45.666, -18.516 45.610, -18.560 45.645)'::geometry,
+          'LINESTRING(-19.090 45.232, -19.046 45.287, -19.016 45.231, -19.090 45.232)'::geometry,
+          'LINESTRING(-19.186 45.551, -19.164 45.612, -19.118 45.539, -19.186 45.551)'::geometry,
+          'LINESTRING(-19.480 45.830, -19.426 45.797, -19.503 45.761, -19.480 45.830)'::geometry,
+          'LINESTRING(-19.380 44.871, -19.314 44.890, -19.350 44.802, -19.380 44.871)'::geometry,
+          'LINESTRING(-18.007 44.318, -17.904 44.321, -17.961 44.265, -18.007 44.318)'::geometry,
+          'LINESTRING(-19.867 44.709, -19.732 44.658)'::geometry,
+          'LINESTRING(-19.709 45.811, -19.647 45.855, -19.632 45.770, -19.709 45.811)'::geometry,
+          'LINESTRING(-19.745 46.571, -19.674 46.503, -19.777 46.493, -19.745 46.571)'::geometry,
+          'LINESTRING(-16.799 43.530, -16.776 43.497, -16.765 43.531, -16.799 43.530)'::geometry
+        ]
+      )
     """
-    if args.verbose:
-        print(f"Handle lakes level {level}")
     cursor.execute(f"""
-      SELECT lake.id, lake.wkb_geometry, river.id, river.wkb_geometry
-      FROM {args.table}_lines AS lake, {args.table}_lines AS river
-      WHERE (lake.style NOT LIKE 'Connected' OR lake.style IS NULL) AND (
-          lake.type LIKE 'COASTLINE/tmp-lake%' OR lake.type LIKE 'Lake%'
+      SELECT ST_AsText((
+        ST_Dump(
+          ST_Split(ST_Difference('{river[1]}'::geometry, ST_Buffer('{river[3]}'::geometry, {EPS})), {blade})
         )
-        AND (
-          river.type LIKE 'River/{level}/Mouth:end' AND 
-            ST_Distance(
-              ST_MakePolygon(lake.wkb_geometry),
-              ST_StartPoint(river.wkb_geometry)
-            )
-            < 2*{EPS} OR
-          river.type LIKE 'River/{level}/Mouth:start' AND 
-            ST_Distance(
-              ST_MakePolygon(lake.wkb_geometry),
-              ST_EndPoint(river.wkb_geometry)
-            )
-            < 2*{EPS}
-        )
+      ).geom)
     """)
-    lake_river_list = cursor.fetchall()
-    for lake_river in lake_river_list:
-        if args.verbose:
-            print(f"- lake {lake_river[0]} and river {lake_river[2]}")
+    lines = cursor.fetchall()
+    verbosity(verbose, f"- - new rivers: {len(lines)}")
+    for line in lines:
         cursor.execute(f"""
-          UPDATE {args.table}_lines SET style = 'Connected'
-          WHERE id = {lake_river[0]}
-        """)
-        cursor.execute(f"""
-          WITH lines(geo) AS (
-            SELECT (
-              ST_Dump(
-                ST_Difference(
-                  ST_MakeValid('{lake_river[3]}'::geometry),
-                  ST_MakeValid(ST_MakePolygon('{lake_river[1]}'::geometry))
-                )
-              )
-            ).geom
+          INSERT INTO {table} (id, name, type, style, wkb_geometry)
+          VALUES (
+            nextval('serial'), 'temporary area river', '/STREAMS-LAKE/tmp-river',
+            '%fill: #36868d%', ST_Boundary('{line[0]}'::geometry)
           )
-          SELECT lines.geo FROM lines ORDER BY ST_Length(lines.geo) DESC
-          LIMIT 1
+          RETURNING id
         """)
-        line = cursor.fetchall()
-        if len(line) > 0:
-            cursor.execute(f"""
-              UPDATE {args.table}_lines SET wkb_geometry = '{line[0][0]}'::geometry
-              WHERE id = {lake_river[2]}
-            """)
-        handle_river(args, cursor, level + 1, lake_river[1])
+        verbosity(verbose, f"- add river {cursor.fetchall()[0][0]}")
 
-def handle_river(args, cursor, level, old):
-    """Finds and connects rivers n+1-removed to those n removed. Consider
-    lakes.
-    """
-    if args.verbose:
-        print(f"Handle outflows level {level}")
-    if f"{old}" == "None":
-        return 0
-    obj = f"'{old}'::geometry"
     cursor.execute(f"""
-      SELECT id, name, type,
-        ST_Distance({obj},ST_StartPoint(wkb_geometry)),
-        ST_Distance({obj},ST_EndPoint(wkb_geometry))
+      UPDATE {table} SET name = 'split temp river', style = 'n/a' WHERE id = {river[0]}
+    """)
+
+def split_river(verbose, table, cursor, river):
+    """Removes lakes from rivers, adding more river sections in the process."""
+    verbosity(verbose, f"- Remove lakes from {river[0]}")
+    cursor.execute(f"""
+      SELECT (ST_Dump(ST_LineMerge(
+        ST_Difference('{river[1]}'::geometry, ST_MakeValid('{river[3]}'::geometry))
+      ))).geom
+    """)
+    lines = cursor.fetchall()
+    verbosity(verbose, f"- - new rivers: {len(lines)}")
+    for line in lines:
+        cursor.execute(f"""
+          INSERT INTO {table} (id, name, type, wkb_geometry)
+          VALUES (nextval('serial'), 'candidate', 'STREAMS', '{line[0]}'::geometry)
+        """)
+    cursor.execute(f"UPDATE {table} SET name = 'split candidate' WHERE id = {river[0]}")
+
+def connect_to_level(args, cursor, connect_to, level):
+    """Find lakes and rivers connected to level lakes and rivers."""
+    verbosity(args.verbose, f"Handle level {level}")
+
+    geom = f"'{connect_to[0][0]}'::geometry"
+    # Rivers to level
+    cursor.execute(f"""
+      SELECT id, ST_Distance({geom}, ST_StartPoint(wkb_geometry)),
+        ST_Distance({geom}, ST_EndPoint(wkb_geometry))
       FROM {args.table}_lines
-      WHERE name = 'candidate' AND (type NOT LIKE 'River/%' OR type IS NULL) AND (
-          ST_Distance({obj},ST_StartPoint(wkb_geometry)) < 2*{EPS} OR
-          ST_Distance({obj},ST_EndPoint(wkb_geometry)) < 2*{EPS}
+      WHERE name = 'candidate' AND (type NOT LIKE 'River/%' OR type IS NULL)
+        AND (
+          ST_Distance({geom}, ST_StartPoint(wkb_geometry)) < 2*{EPS} OR
+          ST_Distance({geom}, ST_EndPoint(wkb_geometry)) < 2*{EPS}
         )
     """)
     lines = cursor.fetchall()
-    if args.verbose:
-        print(f"Shift {len(lines)} rivers' exit nodes")
-    for pts in lines:
-        if args.verbose:
-            print(f"- line {pts[0]}")
-        vertex = 'start' if pts[3] < pts[4] else 'end'
+    verbosity(args.verbose and len(lines) > 0, f"- connect {len(lines)} rivers")
+    for line in lines:
+        verbosity(args.verbose, f"- - line {line[0]}")
+        vertex = 'start' if line[1] < line[2] else 'end'
         idx = 0 if vertex == 'start' else -1
         while True:
             cursor.execute(f"""
-              SELECT ST_NPoints(wkb_geometry)
-              FROM {args.table}_lines
-              WHERE id = {pts[0]}
+              SELECT ST_NPoints(wkb_geometry) FROM {args.table}_lines WHERE id = {line[0]}
             """)
-            line = cursor.fetchall()
-            if args.verbose:
-                print(f"- - shorten {pts[0]}: {line[0][0]}")
+            line_length = cursor.fetchall()
             cursor.execute(f"""
-              SELECT ST_Intersects({obj}, wkb_geometry)
-              FROM {args.table}_lines WHERE id = {pts[0]}
+              SELECT ST_Intersects({geom}, wkb_geometry)
+              FROM {args.table}_lines WHERE id = {line[0]}
             """)
             intersects = cursor.fetchall()[0]
-            if not intersects[0] or line[0][0] == 2:
+            if not intersects[0] or line_length[0][0] == 2:
                 break
+            verbosity(args.verbose, f"- - - reduce from {line_length[0][0]} points")
             cursor.execute(f"""
               UPDATE {args.table}_lines SET wkb_geometry =
                 ST_RemovePoint(wkb_geometry, {idx} * (1 - ST_NPoints(wkb_geometry)))
-              WHERE id = {pts[0]}
+              WHERE id = {line[0]}
             """)
         cursor.execute(f"""
           SELECT wkb_geometry,
-            ST_ClosestPoint({obj}, ST_{vertex.capitalize()}Point(wkb_geometry))
+            ST_ClosestPoint({geom}, ST_{vertex.capitalize()}Point(wkb_geometry))
           FROM {args.table}_lines
-          WHERE id = {pts[0]}
+          WHERE id = {line[0]}
         """)
-        pts2 = cursor.fetchall()
-        if len(pts2) > 0:
-            cursor.execute(f"""
-              INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
-              VALUES (
-                nextval('serial'), '-', 'River/{level}/Mouth:{vertex}',
-                ST_SetPoint(
-                  ST_RemoveRepeatedPoints('{pts2[0][0]}'::geometry), {idx},
-                  '{pts2[0][1]}'::geometry
-                )
-              );
-              DELETE FROM {args.table}_lines WHERE id = {pts[0]}
-            """)
-    handle_lakes(args, cursor, level)
-    return len(lines)
+        new_line = cursor.fetchall()
+        cursor.execute(f"""
+          INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+          VALUES (
+            nextval('serial'), '-', 'River/{level}/Mouth:{vertex}',
+            ST_SetPoint(
+              ST_RemoveRepeatedPoints('{new_line[0][0]}'::geometry), {idx},
+              '{new_line[0][1]}'::geometry
+            )
+          );
+          DELETE FROM {args.table}_lines WHERE id = {line[0]}
+        """)
+
+    # Lakes to level (we assume no intersection of lakes)
+    cursor.execute(f"""
+      SELECT id, ST_Distance(wkb_geometry, {geom})
+      FROM {args.table}_lines
+      WHERE (style NOT LIKE 'Connected/%' OR style IS NULL)
+        AND (
+          type LIKE 'COASTLINE/tmp-lake%' OR type LIKE 'Lake%'
+        )
+        AND
+          ST_Distance(wkb_geometry, {geom}) < {EPS}
+    """)
+    lakes = cursor.fetchall()
+    verbosity(args.verbose and len(lakes) > 0, f"- connect {len(lakes)} lakes")
+    for lake in lakes:
+        verbosity(args.verbose, f"- - lake {lake[0]}")
+        cursor.execute(f"""
+          SELECT ST_StartPoint(line), ST_EndPoint(line) FROM (
+            SELECT ST_ShortestLine(ST_Collect(geo), {geom})
+            AS line
+            FROM (
+              SELECT (ST_DumpPoints(wkb_geometry)).geom AS geo
+              FROM {args.table}_lines
+              WHERE id = {lake[0]}
+            )
+          )
+        """)
+        pts = cursor.fetchall()[0]
+        cursor.execute(f"""
+          UPDATE {args.table}_lines
+          SET style = 'Connected/{level}',
+            wkb_geometry = ST_SetPoint(wkb_geometry, path - 1, '{pts[1]}'::geometry)
+          FROM (
+            SELECT (geo).path[1] AS path, (geo).geom AS geo FROM (
+              SELECT ST_DumpPoints(ST_RemoveRepeatedPoints(wkb_geometry))
+              AS geo
+              FROM {args.table}_lines
+              WHERE id = {lake[0]}
+            )
+            WHERE (geo).geom = '{pts[0]}'::geometry
+          )
+          WHERE id = {lake[0]};
+          -- Close potentially opened lake --
+          UPDATE {args.table}_lines
+          SET wkb_geometry = ST_AddPoint(wkb_geometry, ST_StartPoint(wkb_geometry))
+          WHERE id = {lake[0]} AND ST_IsClosed(wkb_geometry) = FALSE
+        """)
 
 def execute(args, cursor):
     """Actual main method. Iterates through levels."""
     # Initialize
-    cursor.execute(f"""
-      SELECT count(*) FROM {args.table}_lines
-      WHERE type LIKE '%STREAMS%' AND (
-          NOT ST_IsClosed(wkb_geometry) OR
-            ST_IsClosed(wkb_geometry) AND style LIKE '%fill: #36868d%'
-        )
-    """)
+    cursor.execute(f"SELECT count(*) FROM {args.table}_lines WHERE type LIKE '%STREAMS%'")
     print(f"Found {cursor.fetchall()[0][0]} rivers")
 
-    # These are all extended rivers
     cursor.execute(f"""
-      SELECT t1.id, 
-        ST_ExteriorRing(
-          ST_MakePolygon(
-            ST_LineMerge(ST_AddPoint(t1.geo, ST_StartPoint(t1.geo)))
-          )
+      UPDATE {args.table}_lines SET name = 'candidate'
+      WHERE type LIKE '%STREAMS%' AND (style NOT LIKE '%fill: #36868d%' OR style IS NULL)
+    """)
+
+    # Remove Arain and Tontury Lakes from Area rivers
+    cursor.execute(f"""
+      SELECT t1.id, ST_MakePolygon(t1.wkb_geometry),
+        array_agg(t2.id), ST_Collect(ST_MakeValid(ST_MakePolygon(t2.wkb_geometry)))
+      FROM {args.table}_lines AS t1, {args.table}_lines AS t2
+      WHERE ST_Intersects(t1.wkb_geometry, t2.wkb_geometry)
+      AND t1.name = 'temporary area river' AND (t2.name = 'Lake/Tontury' OR t2.name = 'Lake/Arain')
+      GROUP BY t1.id
+    """)
+    rows = cursor.fetchall()
+    print(f"Removing Arain & Tontury from area rivers: {len(rows)}")
+    for row in rows:
+        split_basin_river(args.verbose, f"{args.table}_lines", cursor, row)
+
+    # Close area rivers and extract axis
+    cursor.execute(f"""
+      UPDATE {args.table}_lines
+      SET wkb_geometry =
+        ST_RemoveRepeatedPoints(ST_AddPoint(wkb_geometry, ST_StartPoint(wkb_geometry)))
+      WHERE type LIKE '%STREAMS%' AND style LIKE '%fill: #36868d%'
+    """)
+    cursor.execute(f"""
+      SELECT t1.id, (
+        SELECT ST_ExteriorRing(geo) FROM (
+          SELECT (
+            ST_Dump(ST_CollectionExtract(ST_Polygonize(ST_Node(t1.geo)), 3))
+          ).geom
+          AS geo
         )
-        AS geo
+        ORDER BY ST_Perimeter(geo) DESC LIMIT 1
+      )
       FROM (
         SELECT id, wkb_geometry FROM {args.table}_lines
         WHERE type LIKE '%STREAMS%' AND 
-          style LIKE '%fill: #36868d%' AND
-          ST_NumPoints(wkb_geometry) > 2
+          style LIKE '%fill: #36868d%'
       )
       AS t1 (id, geo)
       WHERE NOT ST_IsEmpty(geo)
+      GROUP BY t1.id
     """)
     rows = cursor.fetchall()
     print(f"Thinning area rivers: {len(rows)}")
     for row in rows:
         make_axis(args.verbose, f"{args.table}_lines", cursor, row)
 
+    # Remove Lakes from Rivers
     cursor.execute(f"""
-      UPDATE {args.table}_lines SET name = 'candidate'
-      WHERE type LIKE '%STREAMS%' AND NOT ST_IsClosed(wkb_geometry)
+      SELECT t1.id, t1.wkb_geometry,
+        array_agg(t2.id), ST_Collect(ST_MakeValid(ST_MakePolygon(t2.wkb_geometry)))
+      FROM {args.table}_lines AS t1, {args.table}_lines AS t2
+      WHERE ST_Intersects(t1.wkb_geometry, t2.wkb_geometry)
+      AND t1.name = 'candidate' AND t2.type LIKE 'Lake%'
+      GROUP BY t1.id
     """)
+    rows = cursor.fetchall()
+    print(f"Removing lakes from rivers: {len(rows)}")
+    for row in rows:
+        split_river(args.verbose, f"{args.table}_lines", cursor, row)
 
     # Shores
-    cursor.execute(f"""
-      SELECT ST_Union(wkb_geometry) FROM {args.table}_lines WHERE type = '0'
-    """)
-    old_term = cursor.fetchall()[0][0]
-    length = handle_river(args, cursor, 0, old_term)
+    level = 0
+    cursor.execute(f"SELECT ST_Collect(wkb_geometry) FROM {args.table}_lines WHERE type = '0'")
+    connect_to = cursor.fetchall()
 
     # Recurse rivers into rivers
-    level = 0
-    while length > 0:
+    while len(connect_to) > 0 and connect_to[0][0] is not None:
+        connect_to_level(args, cursor, connect_to, level)
         level = level + 1
         cursor.execute(f"""
-          SELECT ST_Union(wkb_geometry) FROM {args.table}_lines
-          WHERE type LIKE 'River/{level-1}/%'
+          SELECT ST_Collect(wkb_geometry) FROM (
+            SELECT wkb_geometry FROM {args.table}_lines WHERE type LIKE 'River/{level-1}/%'
+            UNION
+            SELECT wkb_geometry FROM {args.table}_lines WHERE style = 'Connected/{level-1}'
+          )
         """)
-        old_term = cursor.fetchall()[0][0]
-        length = handle_river(args, cursor, level, old_term)
+        connect_to = cursor.fetchall()
 
     # Remove temporaries from geo_coast
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines WHERE name = 'temporary area river'
-    """)
+    cursor.execute(f"DELETE FROM {args.table}_lines WHERE name = 'temporary area river'")
+
     cursor.execute(f"""
       SELECT count(*) FROM {args.table}_lines
-      WHERE type LIKE '%STREAMS%' AND NOT ST_IsClosed(wkb_geometry) AND
-          NOT (name = '-')
+      WHERE type LIKE '%STREAMS%' AND NOT ST_IsClosed(wkb_geometry) AND NOT (name = '-')
     """)
-
     print(f"Leave {cursor.fetchall()[0][0]} rivers")
 
 def main():
@@ -296,9 +382,7 @@ def main():
 def test_unit1(args, typ, cursor):
     """Simple tests with artificial rivers and lakes. Lakes and coast."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines
-    """)
+    cursor.execute(f"DELETE FROM {args.table}_lines")
     cursor.execute(f"""
       INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
       VALUES (
@@ -395,74 +479,61 @@ def test_unit1(args, typ, cursor):
     # 1
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.1 10)'::geometry AND
-        type = 'River/0/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.1 10)'::geometry AND type = 'River/0/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     # 2
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(10.2 10)'::geometry AND
-        type = 'River/0/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(10.2 10)'::geometry AND type = 'River/0/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     # 3
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.3 10)'::geometry AND
-        type = 'River/0/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.3 10)'::geometry AND type = 'River/0/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.3 10.12)'::geometry AND
-        type = 'River/1/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.3 10.12)'::geometry AND type = 'River/2/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     # 4
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.4 10)'::geometry AND
-        type = 'River/0/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.4 10)'::geometry AND type = 'River/0/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(10.4 10.12)'::geometry AND
-        type = 'River/1/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(10.4 10.12)'::geometry AND type = 'River/2/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     # 5
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(10.5 10)'::geometry AND
-        type = 'River/0/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(10.5 10)'::geometry AND type = 'River/0/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.5 10.12)'::geometry AND
-        type = 'River/1/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.5 10.12)'::geometry AND type = 'River/2/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     # 6
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(10.6 10)'::geometry AND
-        type = 'River/0/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(10.6 10)'::geometry AND type = 'River/0/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(10.6 10.12)'::geometry AND
-        type = 'River/1/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(10.6 10.12)'::geometry AND type = 'River/2/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
-
     print(f"> {num_tests} tests passed")
 
 def test_unit2(args, typ, cursor):
     """Simple tests with multiple artificial rivers and lakes. Lakes and coast."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines
-    """)
+    cursor.execute(f"DELETE FROM {args.table}_lines")
     cursor.execute(f"""
       INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
       VALUES (
@@ -563,63 +634,51 @@ def test_unit2(args, typ, cursor):
     # 7
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.7 10)'::geometry AND
-        type = 'River/0/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.7 10)'::geometry AND type = 'River/0/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.7 10.12)'::geometry AND
-        type = 'River/1/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.7 10.12)'::geometry AND type = 'River/2/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.7 10.22)'::geometry AND
-        type = 'River/2/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.7 10.22)'::geometry AND type = 'River/4/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     # 8
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.8 10)'::geometry AND
-        type = 'River/0/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.8 10)'::geometry AND type = 'River/0/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.8 10.12)'::geometry AND
-        type = 'River/1/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.8 10.12)'::geometry AND type = 'River/2/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(10.8 10.22)'::geometry AND
-        type = 'River/2/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(10.8 10.22)'::geometry AND type = 'River/4/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     # 9
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(10.9 10)'::geometry AND
-        type = 'River/0/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(10.9 10)'::geometry AND type = 'River/0/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(10.9 10.12)'::geometry AND
-        type = 'River/1/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(10.9 10.12)'::geometry AND type = 'River/2/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(10.9 10.22)'::geometry AND
-        type = 'River/2/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(10.9 10.22)'::geometry AND type = 'River/4/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
-
     print(f"> {num_tests} tests passed")
 
 def test_unit3(args, typ, cursor):
     """Tests with artificial long rivers and lakes. Lakes and coast."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines
-    """)
+    cursor.execute(f"DELETE FROM {args.table}_lines")
     cursor.execute(f"""
       INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
       VALUES (
@@ -682,33 +741,27 @@ def test_unit3(args, typ, cursor):
     # 10
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(11.0 10)'::geometry AND
-        type = 'River/0/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(11.0 10)'::geometry AND type = 'River/0/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(11.0 10.12)'::geometry AND
-        type = 'River/1/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(11.0 10.12)'::geometry AND type = 'River/2/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 2
     # 11
     num_tests += 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(11.1 10)'::geometry AND
-        type = 'River/0/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(11.1 10)'::geometry AND type = 'River/0/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_EndPoint(wkb_geometry) = 'POINT(11.1 10.12)'::geometry AND
-        type = 'River/1/Mouth:end'
+        ST_EndPoint(wkb_geometry) = 'POINT(11.1 10.12)'::geometry AND type = 'River/2/Mouth:end'
     """)
     assert cursor.fetchall()[0][0] == 1
     cursor.execute(f"""{sel}
-        ST_StartPoint(wkb_geometry) = 'POINT(11.1 10.12)'::geometry AND
-        type = 'River/1/Mouth:start'
+        ST_StartPoint(wkb_geometry) = 'POINT(11.1 10.12)'::geometry AND type = 'River/2/Mouth:start'
     """)
     assert cursor.fetchall()[0][0] == 1
-
     print(f"> {num_tests} tests passed")
 
 def test_sample_area1(args, cursor):
@@ -802,9 +855,7 @@ def test_sample_area1(args, cursor):
 def test_sample_lake_river(args, cursor):
     """Extracted real lake/river interaction that proved difficult at one time."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines
-    """)
+    cursor.execute(f"DELETE FROM {args.table}_lines")
     cursor.execute(f"""
       INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
       VALUES (
@@ -887,24 +938,18 @@ def test_sample_lake_river(args, cursor):
 
     # Test object
     execute(args, cursor)
-    cursor.execute(f"""
-      SELECT count(*) FROM {args.table}_lines WHERE type = 'River/1/Mouth:start'
-    """)
+    cursor.execute(f"SELECT count(*) FROM {args.table}_lines WHERE type = 'River/2/Mouth:start'")
     assert cursor.fetchall()[0][0] == 1
     print("> 1 test passed")
 
 def test_sample_area2(args, cursor):
     """Odditiy non-closed river."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines
-    """)
+    cursor.execute(f"DELETE FROM {args.table}_lines")
     cursor.execute(f"""
       INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
       VALUES (
-        nextval('serial'), '-', '0',
-        'LINESTRING(10 10, 30 10, 30 20, 10 20, 10 10
-        )'::geometry
+        nextval('serial'), '-', '0', 'LINESTRING(10 10, 30 10, 30 20, 10 20, 10 10)'::geometry
       )
     """)
     cursor.execute(f"""

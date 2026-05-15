@@ -66,7 +66,32 @@ def obtain_names(args, cursor):
           WHERE id = {row[0]}
         """)
 
-    print("Label typed")
+    print("Label lakes")
+    cursor.execute(f"""
+      SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') from 2)),
+        ltrim(t2name,'A''BCDEFGHIJKLMNOPQRSTUVWXYZ')
+      FROM (
+        SELECT t1.id AS t1id, substring(t2.name from 9) AS t2name, dist FROM {args.table}_lines AS t1,
+        LATERAL (
+          SELECT t3.name AS name, ST_Distance(t1.wkb_geometry, t3.wkb_geometry) AS dist
+          FROM {args.table}_pts AS t3
+          WHERE regexp_like(t3.name, 'AnyName/Lake')
+          ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry)
+          LIMIT 1
+        )
+        AS t2
+        WHERE t1.style LIKE '%fill: #d4effc%' AND dist < {EPS} ORDER BY dist DESC
+      )
+    """)
+    for row in cursor.fetchall():
+        row1 = row[1].replace("'", "''")
+        cursor.execute(f"""
+          UPDATE {args.table}_lines
+          SET name = '{row1}', svgid = {row[2]}
+          WHERE id = {row[0]}
+        """)
+
+    print("Label any")
     cursor.execute(f"""
       SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') from 2)),
         ltrim(t2name,'A''BCDEFGHIJKLMNOPQRSTUVWXYZ')
