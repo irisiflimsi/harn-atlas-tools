@@ -1,163 +1,137 @@
 # harn-atlas-tools
 
-A script collection to extract GIS data from Harn Atlas Map exports.
-All scripts take the -v flag.  Scripts that do not completely digest
-all entries usually print the number of remaining lines at the end.
-They will be considered in a later step or, if that proves impossible,
-they need to be eyeballed.
+The repo contains a script collection to extract GIS data from Harn
+Atlas Map exports.  It also contains a presentation suite to present
+the results.  The latter contains some personal choices (also see the
+architectire) and is far from ready, while the extracting scripts have
+already progressed substantially.
 
-Runtime is an estimate on my PC.
+While the presentation layer is self-installing (you have to have
+*docker* installed, though) the extractions are python scripts, which
+require you to potentially install a few dependency packages.
 
-The scripts are not re-entrant, i.e. don't call them a second time on
-the modified dataset.  Many scripts take a -T as option to execute
-some tests.  All take a -v option to output more debug information.
+## Transformation
 
-## Extraction
+The scripts are not re-entrant, i.e. don't call them a second time.
+This may lead to unexpected results but is usually harmless.  They
+also modify the data sets, except the original SVG, which remains
+unmodified.
 
-The following is the rough procedure to follow.  First extract *name*
-information with
+The scripts are organized in four groups: *svg2geo*, *geo2raw*,
+*raw2ext*, and *ext2pres*.  All take a *-T* switch for testing, even
+if no tests are available.  The log-level may be specified by *-l* and
+*-h* shows help.
 
-    python svg_replace.py -i ~/Downloads/HarnAtlas-Clean-01.91.svg -o ~/transformed.svg
+The complete extraction process may take some time, with the current
+export from AI called **HarnAtlas-Clean-01.91.svg** it takes about
+10-30 minutes. The *Presentation* section contains a complete build,
+if you do not care about individual steps.
 
-This also exchanges graphical letters with real text, which probably
-don't render nice but will be put into the database for later
-analysis.
+### svg2geo
 
-> Runtime: 20 seconds
+This package exchanges many graphical letters with real text, which
+probably don't render nice but will be put into the database for later
+analysis.  This is done in a preprocessing script.
 
-Then
+The main purpose is to create *points*, *polygons*, and *lines* files,
+called `geo_<type>.json`, respectively.  They contain *GeoJSON* data.
+Additionally, a transformed file *geo.svg* is provided for debugging
+purposes.  (The last is irrespective of the logging level.)
 
-    python svg2geo.py -i ~/transformed.svg -o xyz.json
-
-This will create points, polygons and lines in separate files, called
-`xyz_<type>.json`, respectively. Because Shape files cannot have
-different geometries in one file, they are separated.  Only Shape
-files and GeoJson are supported.  Of course, `xyz` can be exchanged
-with any other name (avoid blanks).
-
-Make sure you have a postgres database set up, so the following will
-work.  Include the postgis extensions.  I had a bug in the geometry
-containment section, but that automatically got resolved after a
-fruitless try of an upgrade and a reboot of my machine.  Just make
-sure your versions are fairly recent.
-
-The script now also evaluates style information to be considered in
+The script also evaluates style information to be considered in
 heuristics later.
 
-> Runtime: 1 minute
+    python svg2geo -i ~/HarnAtlas-Clean-01.91.svg -o geo
 
-## DB preparation
+### geo2raw
 
-    ogr2ogr -f PostgreSQL PG:"dbname=dbname host=localhost user=user port=5432 password=password" xyz_lines.json -nln xyz_lines
-    ogr2ogr -f PostgreSQL PG:"dbname=dbname host=localhost user=user port=5432 password=password" xyz_pts.json -nln xyz_pts
-    ogr2ogr -f PostgreSQL PG:"dbname=dbname host=localhost user=user port=5432 password=password" xyz_polys.json -nln xyz_polys
+This is a thin python wrapper for ogr2ogr.
 
-Replace `dbname`, `user`, `password`, `xyz` with whatever makes sense
-for you. This will dump the lines into the table `xyz_lines`. After
-this, we can make use of the index on the geo-coordinates.
+Make sure you have a postgis database set up.  Include the postgis
+extensions.  Make sure your versions are fairly recent.  Replace
+`dbname`, `user`, `password` with whatever makes sense for you.
 
-You can also use ogr2ogr to convert db data into Shapefiles and
-GeoJson or a lot of other things. A great tool from a great toolset.
+This script includes a (fake) closed coastline and benefits coast and
+river calculations.
 
-> Runtime: 1 minute total
+    python geo2raw -i geo -o raw
 
-For the current export, execute the following SQL statement on your DB.
+### raw2ext
 
-    psql postgresql://user:password@localhost:port/dbname -f dummies.sql
+This script extracts as much information as possible from the raw
+tables and writes them back.  In other words, the raw table contains
+the extracted data.  (Maybe this will change in the future.)  The
+extraction sequence (`-e`) is always the same, but individual parts
+can be left out at your own peril.
 
-to *xyz_lines*.  This yields a (fake) closed coastline and benefits
-coast and river calculations.  The accuracy of these additional
-insertions is proven for *EPS = 0.006* in the various scripts.
-Changing EPS may make these lines inaccurate.
+Each extraction is committed separately, so you do not have to restart
+the whole procedure, but you just need to remove the already committed
+part from the extraction list.  On the other hand, if the fault's root
+actually lies in a previous step, you probably have to rerun
+everything.
 
-## Extract Names
+Extraction list entries are lower case and white space is not allowed
+between entries.
 
-This works surprisingly well.
+    python raw2ext -i raw -e contours,names,coast,lakes,roads,flora,rivers
 
-    python geo_pts.py -t xyz -d user:password@dbname:localhost:port
+#### Contours
 
-> Runtime: 2 minutes
+This step extracts the contour lines and assigns height labels to the
+based on the following heuristics:
 
-## Elevation
+* Any label satisfying the regex `\[\^1-9\]\(\[1-9\]\[05\]\|5\)00` is
+  a height label.
 
-    python geo_elevation.py -t xyz -d user:password@dbname:host:port
+* the largest number of close by labels wins.
 
-This step extracts the elevation lines and assigns height labels to
-the based on the following heuristics:
-
-* Any label satisfying the regex `\[\^1-9\]\(\[1-9\]\[05\]\|5\)00` is a height label.
-  If you are into this, don't copy this from markdown.
-
-* Remove one erroneous line.
-
-* the largest number of close (*EPSP*) labels wins.
-
-* connect all endpoints of lines within *EPSL*.
+* connect all endpoints of potential contour lines within *EPSL*.
 
 * All unlabeled rings around peaks go in 500ft steps to the outermost
   labeled ring.
 
-* Lines closed will be turned into polygons.
+* Closed contour lines will be turned into polygons.
 
-The type field in the table contains the elevation.  About 200 lines
-have no label at this point.  This heuristic improves with the number
-of closed elevation lines.  With Harn being an island this will
-eventually decrease when all lines will be closed.
+The type field in the table contains the elevation.  This heuristic
+improves with the number of closed elevation lines.  With Harn being
+an island this will eventually decrease when all lines will be closed.
 
-> Runtime: 5 minutes
+#### Names
 
-## Coast line
+Names placed on the map as long as they can automatically be
+associated and obtained reasonably well.
 
-Effectively, this is the 0 elevation line and this is how it will be
+#### Coast
+
+Effectively, this is the 0 contour line and this is how it will be
 treated in later steps.
 
-    python geo_coast.py -t xyz -d user:password@dbname:host:port
+This extraction will detect all closed coastlines (including inland
+islands) and remove rivers by a simple heuristic.  It will also find
+the big lakes that are connected to the coastline; Arain & Tontury
+currently.
 
-will detect all closed coastlines (including inland islands) and
-remove rivers by a simple heuristic.  The coasts are not considered by
-`geo_elevation.py` yet. This will also find the big lakes that are
-connected to the coastline; Arain & Tontury currently.
-
-* Uses *EPSL* to bridge shore gaps and *EPSB* to squeeze out rivers.
-
-> Runtime: 2 minutes
-
-## Lakes
+#### Lakes
 
 This determines all lakes by looking at the fill color.  Elevation of
 lakes is not created, calculations are too complex at this point.  In
 particular, some have elevation in (currently not recovered) text.
 
-    python geo_lakes.py -t xyz -d user:password@dbname:host:port
+#### Roads
 
-* Ignore pathological lakes smaller than *EPS*.
+Extract roads as they were intended from the SVG.  It will connect
+towns (and such) and roads by modifying lines.  The final roads appear
+as *type = 'Trail|Unpaved|Paved'*, but some originals are also modified.
 
-> Runtime: seconds
-
-## Roads
-
-This extracts roads as they were intended from the SVG.  At this point
-the runtime is less than a minute.
-
-    python geo_roads.py -t xyz -d user:password@dbname:host:port
-
-will connect towns (and such) and roads by modifying the lines and
-tables.  The final roads appear as *type = 'Trail|Unpaved|Paved'*, but
-the original is also modified.
-
-* connect all road end-points within distance *EPSG* to the road
-  network. and all road points to locations within the same distance.
+* connect all road end-points to the road network and all road points
+  to locations within some distance.
 
 * Remove short end artifacts from the road network.
 
-> Runtime: 1 minute
-
-## Vegetation
+#### Flora
 
 Turns the WOODLAND, CROPLAND, HEATH, FOREST, NEEDLELEAF, ALPINE,
 SNOW_x2F_ICE into multipolygons (in the postgis sense).
-
-    python geo_vegetation.py -t xyz -d user:password@dbname:host:port
 
 Any set at position *n* in this list is reduced by every multipolygon
 at later positions.  I.e. the multipolygons are disjoint.  position
@@ -166,17 +140,15 @@ otherwise.
 
 * The above is called "reduce & normalize" in the script.
 
-* Use *EPS* to grow a bit to cover draw glitches.
+* Grow patches a bit to cover draw glitches.
 
 * Vegetation is restricted to land.
 
 * Shoal/Reef is restricted to off land.
 
-* The results are in the *xyz_polys* table, type prefixed with `VEG/`.
+* The results are in the *polygons* table, type prefixed with `VEG/`.
 
-> Runtime: 3 minutes
-
-## Rivers
+#### Rivers
 
 Determines rivers from shores to springs in iterations.  Rivers are
 created with type *River/n/Mouth:vertex*, where *n* is the level (from
@@ -184,29 +156,40 @@ created with type *River/n/Mouth:vertex*, where *n* is the level (from
 depending on the orientation of the linestring.  It includes
 directionless lake connectivity, but with level.
 
-    python geo_rivers.py -t xyz -d user:password@dbname:host:port
+### ext2pres
 
-> Runtime: 6 minutes
+These scripts convert the extracted material into presentation db
+tables for each layer.  We assume *0* zoom to show one tile for 360
+(by 180) degrees.  Every zoom level takes four times as many tiles
+than the previous.  E.g. at zoom level 4, each tile spans 22.5 (by
+22.5) degrees.  See https://docs.mapbox.com/help/glossary/zoom-level/.
 
-## Elevation field
+#### Raster
 
-The next step is a a computationally more involved process.
-Interpolation is not trivial and needs some *numerical stability*.
+This step is a computationally involved process.  The script creates a
+height field as *raster*.  This version dumps everything into the
+table *pres_atlas_raster*.  It adds some fractal "realism", which can
+be switched off in the script.
 
-    python geo_height.py -v -t xyz -g -16 40 -H 32 -d user:password@dbname:localhost:25432
+The raster is currently only for the isle of Melderyn, since this step
+has the longest duration already by far already and only that part of
+Harn has only closed contour lines.
 
-The script creates an elevation field called *all.tif*.  The *--geo*
-option takes *lon* and *lat* coordinates, the above example is
-arbitrary, but relevant for the time the script takes. The *--hscale*
-option maps the map elevations given in feet to the out band and
-should logically by be about 1/3.  I found 32 to be useful for
-debugging.  This version dumps all elevation raster fields into the
-table *..._heights* of the db.
+Since not all tools behave weel with raster tables, the rasters are
+created as *GeoTIFF* and db table data.
 
-Currently a scale of 400m x 400m pixels is hard-coded, this takes a
-couple of minutes on Melderyn.  Note that the geo coordinates take
-only integer degrees and a run covers only a 1x1 "degree square".  The
-runtime heavily depends on the density of elevation features in it, so
-no meaningful runtime estimate can be given.
+## Presentation
 
-> Runtime: a few minutes
+The provided atlas map is best at zooms (256px) tile size of 10km,
+which means it can be used for zooms 11-12.  To balance under- and
+overscaling artefacts against database size, we create table for the
+following zoom ranges. A best guess for Harn nomenclature is attached.
+(The *Domain* size is missing in Harn maps and is made up for the
+purpose of this project.)
+
+* 0-3: World      ( 1 :  70M )
+* 5-7: Regional   ( 1 :   4M )
+* 8-11: Atlas     ( 1 : 250k )
+* 12-15: Domain   ( 1 :  15k )
+* 16-19: Local    ( 1 :   1k )
+* 20-23: Interior ( 1 :  64  )

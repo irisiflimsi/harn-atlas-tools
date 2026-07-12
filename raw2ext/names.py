@@ -2,26 +2,23 @@
 """
 Create peak names and height.
 """
-import argparse
-import sys
-import psycopg2
+import logging
+from raw2ext import sql
+
+LOGGER = logging.getLogger(__name__)
 
 # Distance of name from (intended) POI
 EPS = 0.04
 # Distance for duplicates
 EPSD = 0.001
 
-def obtain_names(args, cursor):
+def obtain_names(points, lines):
     """Associate names to peaks"""
-    cursor.execute(f"""
-      SELECT count(*) FROM {args.table}_pts WHERE name = '-'
-    """)
-    print(f"Unnamed points...{cursor.fetchall()[0][0]}")
 
     # Remove pure labels
-    print("Remove pure labels")
-    cursor.execute(f"""
-      DELETE FROM {args.table}_pts
+    LOGGER.info("Remove pure labels")
+    sql(f"""
+      DELETE FROM {points}
       WHERE type LIKE 'Alpine %' OR
         type LIKE 'Needleleaf %' OR
         type LIKE 'Woodlands %' OR
@@ -40,15 +37,15 @@ def obtain_names(args, cursor):
         type LIKE '/BOUNDARIES%'
     """)
 
-    print("Label peaks")
-    cursor.execute(f"""
+    LOGGER.info("Label peaks")
+    sql(f"""
       SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') from 2)),
         ltrim(t2name,'A''BCDEFGHIJKLMNOPQRSTUVWXYZ')
       FROM (
-        SELECT t1.id AS t1id, substring(t2.name from 10) AS t2name, dist FROM {args.table}_pts AS t1,
+        SELECT t1.id AS t1id, substring(t2.name from 10) AS t2name, dist FROM {points} AS t1,
         LATERAL (
           SELECT t3.name AS name, ST_Distance(t1.wkb_geometry, t3.wkb_geometry) AS dist
-          FROM {args.table}_pts AS t3
+          FROM {points} AS t3
           WHERE regexp_like(t3.name, 'PeakName/') AND
             NOT (t3.name LIKE '%000' OR t3.name LIKE '%500')
           ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry)
@@ -58,23 +55,19 @@ def obtain_names(args, cursor):
         WHERE t1.type = 'PEAK' AND dist < {EPS} ORDER BY dist DESC
       )
     """)
-    for row in cursor.fetchall():
+    for row in sql():
         row1 = row[1].replace("'", "''")
-        cursor.execute(f"""
-          UPDATE {args.table}_pts
-          SET name = '{row1}', svgid = {row[2]}
-          WHERE id = {row[0]}
-        """)
+        sql(f"UPDATE {points} SET name = '{row1}', svgid = '{row[2]}' WHERE id = {row[0]}")
 
-    print("Label lakes")
-    cursor.execute(f"""
+    LOGGER.info("Label lakes")
+    sql(f"""
       SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') from 2)),
         ltrim(t2name,'A''BCDEFGHIJKLMNOPQRSTUVWXYZ')
       FROM (
-        SELECT t1.id AS t1id, substring(t2.name from 9) AS t2name, dist FROM {args.table}_lines AS t1,
+        SELECT t1.id AS t1id, substring(t2.name from 9) AS t2name, dist FROM {lines} AS t1,
         LATERAL (
           SELECT t3.name AS name, ST_Distance(t1.wkb_geometry, t3.wkb_geometry) AS dist
-          FROM {args.table}_pts AS t3
+          FROM {points} AS t3
           WHERE regexp_like(t3.name, 'AnyName/Lake')
           ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry)
           LIMIT 1
@@ -83,23 +76,19 @@ def obtain_names(args, cursor):
         WHERE t1.style LIKE '%fill: #d4effc%' AND dist < {EPS} ORDER BY dist DESC
       )
     """)
-    for row in cursor.fetchall():
+    for row in sql():
         row1 = row[1].replace("'", "''")
-        cursor.execute(f"""
-          UPDATE {args.table}_lines
-          SET name = '{row1}', svgid = {row[2]}
-          WHERE id = {row[0]}
-        """)
+        sql(f"UPDATE {lines} SET name = '{row1}', svgid = '{row[2]}' WHERE id = {row[0]}")
 
-    print("Label any")
-    cursor.execute(f"""
+    LOGGER.info("Label any")
+    sql(f"""
       SELECT t1id, substring(t2name for 1) || lower(substring(rtrim(t2name,'0123456789') from 2)),
         ltrim(t2name,'A''BCDEFGHIJKLMNOPQRSTUVWXYZ')
       FROM (
-        SELECT t1.id AS t1id, substring(t2.name from 9) AS t2name, dist FROM {args.table}_pts AS t1,
+        SELECT t1.id AS t1id, substring(t2.name from 9) AS t2name, dist FROM {points} AS t1,
         LATERAL (
           SELECT t3.name AS name, ST_Distance(t1.wkb_geometry, t3.wkb_geometry) AS dist
-          FROM {args.table}_pts AS t3
+          FROM {points} AS t3
           WHERE regexp_like(t3.name, 'AnyName/') AND
             NOT (t3.name LIKE '%000' OR t3.name LIKE '%500')
           ORDER BY ST_Distance(t1.wkb_geometry, t3.wkb_geometry) LIMIT 1
@@ -134,30 +123,27 @@ def obtain_names(args, cursor):
         ORDER BY dist DESC
       )
     """)
-    for row in cursor.fetchall():
+    for row in sql():
         row1 = row[1].replace("'", "''")
-        cursor.execute(f"""
-          UPDATE {args.table}_pts
-          SET name = '{row1}', svgid = '{row[2]}'
-          WHERE id = {row[0]}
-        """)
+        sql(f"UPDATE {points} SET name = '{row1}', svgid = '{row[2]}' WHERE id = {row[0]}")
 
-def duplicate_nonames(args, cursor):
+def duplicate_nonames(points):
     """Delete clear, but unnamed duplicates."""
-    print("Delete unnamed duplicates")
-    cursor.execute(f"""
-      DELETE FROM {args.table}_pts AS t0 USING (
-        SELECT t1.id FROM {args.table}_pts AS t1, {args.table}_pts AS t2
+    LOGGER.info("Delete unnamed duplicates")
+    sql(f"""
+      DELETE FROM {points} AS t0 USING (
+        SELECT t1.id FROM {points} AS t1, {points} AS t2
         WHERE t1.id <> t2.id AND ST_Distance(t1.wkb_geometry, t2.wkb_geometry) < {EPSD}
           AND t1.name = '-' AND t2.name <> '-'
       ) AS t1 (id)
       WHERE t0.id = t1.id
     """)
 
-def do_specials(args, cursor):
+def do_specials(points):
     """Manually detected."""
-    cursor.execute(f"""
-      UPDATE {args.table}_pts SET name = 'Varazal''s Wall'
+    LOGGER.info("Manual Additions")
+    sql(f"""
+      UPDATE {points} SET name = 'Varazal''s Wall'
       WHERE (type = '/CITIES/Kaldor/-' OR type = '/TYPE/Chybisa/-') AND
         ST_Covers(
           ST_Envelope(
@@ -166,8 +152,8 @@ def do_specials(args, cursor):
           wkb_geometry
         )
     """)
-    cursor.execute(f"""
-      UPDATE {args.table}_pts SET name = 'Maguda Falls', svgid = 120
+    sql(f"""
+      UPDATE {points} SET name = 'Maguda Falls', svgid = 120
       WHERE (type = '/TYPE/Rethem/-') AND
         ST_Covers(
           ST_Envelope(
@@ -177,41 +163,18 @@ def do_specials(args, cursor):
         )
     """)
 
-def main():
+def main(inpre):
     """Main method."""
-    parser = argparse.ArgumentParser(
-        prog=sys.argv[0],
-        description='Create peak information from postgis database')
-    parser.add_argument(
-        '-d', '--database', dest='db', required=True,
-        help='db to connect to user:password@dbname:host:port')
-    parser.add_argument(
-        '-t', '--table', dest='table', required=True,
-        help='table prefix; _pts and _lines will be added')
-    parser.add_argument(
-        '-v', '--verbose', action='store_true',
-        help='verbose', required=False)
-    args = parser.parse_args()
+    points = f"{inpre}_points"
+    lines = f"{inpre}_lines"
 
-    conn = psycopg2.connect(
-        user=f"{args.db.split('@')[0].split(':')[0]}",
-        password=f"{args.db.split('@')[0].split(':')[1]}",
-        database=f"{args.db.split('@')[1].split(':')[0]}",
-        host=f"{args.db.split('@')[1].split(':')[1]}",
-        port=f"{args.db.split('@')[1].split(':')[2]}")
-    cursor = conn.cursor()
+    sql(f"SELECT count(*) FROM {points} WHERE name = '-'")
+    LOGGER.info("Unnamed points...%s", sql()[0][0])
 
-    obtain_names(args, cursor)
-    duplicate_nonames(args, cursor)
-    do_specials(args, cursor)
+    obtain_names(points, lines)
+    duplicate_nonames(points)
+    do_specials(points)
 
     # Remaining
-    cursor.execute(f"""
-      SELECT count(*) FROM {args.table}_pts WHERE name = '-'
-    """)
-    print(f"Remaining unnamed points...{cursor.fetchall()[0][0]}")
-
-    conn.commit()
-
-if __name__ == '__main__':
-    main()
+    sql(f"SELECT count(*) FROM {points} WHERE name = '-'")
+    LOGGER.info("Remaining unnamed points...%s", sql()[0][0])

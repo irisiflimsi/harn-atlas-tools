@@ -1,20 +1,22 @@
 #!/usr/bin/python
 """
-Convert a 'Harn ATlas Map' SVG into GIS format.  Some details are
+Convert a 'Harn Atlas Map' SVG into GeoJSON format.  Some details are
 caused by specific idiosyncracies of such maps.  Also read the help.
 """
 import re
-import math
 import sys
 import argparse
+import math
+import logging
+import xml
 from dataclasses import dataclass
-from xml.etree import ElementTree
+import numpy
 import fiona
 # pylint: disable=no-name-in-module
 from fiona.crs import CRS
-import numpy
 from shapely.geometry import LineString, mapping, Point, Polygon
 from scipy.spatial import distance
+from svg2geo.replace import substitute_spans, substitute_circles
 
 @dataclass
 class Outfiles:
@@ -43,19 +45,29 @@ class SID:
         """Get sid."""
         return cls.sid
 
+# Stylish
 STYLES = {'-': '-'}
 SYMBOLS = {}
-SCHEMA_LINES = {'geometry': 'LineString', 'properties':
-                {'id': 'int', 'type': 'str', 'len': 'int', 'name': 'str', 'svgid': 'str',
-                 'style': 'str'}}
-SCHEMA_POINTS = {'geometry': 'Point', 'properties':
-                 {'id': 'int', 'type': 'str', 'name': 'str', 'svgid': 'str', 'style': 'str'}}
-SCHEMA_POLYGONS = {'geometry': 'Polygon', 'properties':
-                   {'id': 'int', 'type': 'str', 'name': 'str', 'svgid': 'str'}}
+
+# Schemas
+LINES = {'geometry': 'LineString', 'properties':
+         {'id': 'int', 'type': 'str', 'len': 'int', 'name': 'str', 'svgid': 'str',
+          'style': 'str'}}
+POINTS = {'geometry': 'Point', 'properties':
+          {'id': 'int', 'type': 'str', 'name': 'str', 'svgid': 'str', 'style': 'str'}}
+POLYGONS = {'geometry': 'Polygon', 'properties':
+            {'id': 'int', 'type': 'str', 'name': 'str', 'svgid': 'str'}}
+
+# Regex
 NUM1 = r' ?,?(-?(?:[0-9]*\.?[0-9]+)|(?:[0-9]+))'
 NUM2 = NUM1 + NUM1
 NUM4 = NUM2 + NUM2
 NUM6 = NUM4 + NUM2
+
+# Useless blocks in SVG
+NO_DATA = ['GRID_NUMBERS', 'KINGDOM_MAPS', 'ATLAS_MAPS', 'MAP_GRIDS', 'HEXES']
+
+LOGGER = logging.getLogger(__name__)
 
 def transform(mat, x_c, y_c, size):
     """This is where the projection is 'hidden'."""
@@ -145,7 +157,7 @@ def parse_point(typ, elem, outfiles, size):
         typ += '/' + elem.attrib.get('xlink:href', '-')
         style = re.sub(r".* ", "", elem.attrib.get('transform', '-'))
     else:
-        print(f"{elem.tag} shouldn't be here")
+        LOGGER.error("%s shouldn't be here", elem.tag)
         return
     typ = get_href(typ, elem)
     pointstring = Point(transform(mat, x_c + w_c/2., y_c + h_c/2., size))
@@ -227,7 +239,7 @@ def parse_path(typ, elem, outfiles, size):
             sym1 = "c0,1.24-1.01,2.25-2.25,2.25s-2.25-1.01-2.25"
             sym2 = "-2.25,1.01-2.25,2.25-2.25,2.25,1.01,2.25,2.25Z"
             if sym1 + sym2 in path:
-                print(f"special path for: {name}")
+                LOGGER.warning("special path for:%s", name)
                 x_c += 5.5
                 y_c += 7.5
                 w_c = h_c = 4.5
@@ -335,7 +347,7 @@ def parse_path(typ, elem, outfiles, size):
                 line.append(transform(mat, x_c, y_c, size))
                 path = re.sub(rf"{NUM2} ?,?", '', path, 1)
         else:
-            print(f"broken path:{path}:")
+            LOGGER.error("broken path:%s:", path)
             path = ""
     out_line(line, typ, name, outfiles, elem)
 
@@ -372,7 +384,7 @@ def parse_polygon(typ, elem, outfiles, size):
                                  'properties': {'id': SID.get_sid(), 'type': typ,
                                                 'name': name, 'svgid': elem.attrib.get('id', '-')}})
     else:
-        print(f"pathological:{SID.get_sid()}")
+        LOGGER.error("pathological:%s", SID.get_sid())
 
 def parse_line(typ, elem, outfiles, size):
     """Parse line and write to file."""
@@ -397,7 +409,7 @@ def parse_line(typ, elem, outfiles, size):
         typ += '/' + name
         line = [transform(mat, x1_c, y1_c, size), transform(mat, x2_c, y2_c, size)]
     else:
-        print(f"{elem.tag} shouldn't be here")
+        LOGGER.error("%s shouldn't be here", elem.tag)
         return
     typ = get_href(typ, elem)
     if len(line) > 1:
@@ -409,20 +421,21 @@ def parse_line(typ, elem, outfiles, size):
                             'len': len(line), 'name': name, 'svgid': name,
                             'style': STYLES[elem.attrib.get('class', '-')]}})
     else:
-        print(f"pathological:{SID.get_sid()}")
+        LOGGER.error("pathological:%s", SID.get_sid())
 
-def parse_symbol(args, elem):
+def parse_symbol(elem):
     """Parse symbols."""
-    if args.verbose:
-        print(f"parsing {elem.tag} with id={elem.attrib.get('id', '')} " + \
-              f"and data-name={elem.attrib.get('data-name', '')}")
+    LOGGER.debug(
+        "parsing %s with id=%s and data-name=%s", elem.tag,
+        elem.attrib.get('id', ''), elem.attrib.get('data-name', '')
+    )
     if elem.attrib.get('id', '-') != '-':
         sid = elem.attrib.get('id', '')
         if sid == 'Tollbooth-2':
             sid = 'Tollbooth'
         SYMBOLS[sid] = get_data_name(elem)
 
-def parse_style(args, text):
+def parse_style(text):
     """Parse all styles. Poor man's parsing."""
     keys = []
     for line in text.splitlines():
@@ -431,13 +444,11 @@ def parse_style(args, text):
             pass
         elif line.startswith("."):
             keys = [key[:-1] if key[-1] == ',' else key for key in line.split(' ')[:-1]]
-            if args.verbose:
-                print(f"parsing current style keys {keys}")
+            LOGGER.debug("parsing current style keys %s", keys)
         elif line.startswith("}"):
             pass
         else:
-            if args.verbose:
-                print(f"parsing current style value {line}")
+            LOGGER.debug("parsing current style value %s", line)
             for key in keys:
                 if key[1:] in STYLES:
                     STYLES[key[1:]] += line
@@ -464,11 +475,10 @@ def parse(args, name, root, outfiles, size):
         elif elem.tag.endswith('defs'):
             parse(args, name, elem, outfiles, size)
         elif elem.tag.endswith('symbol'):
-            parse_symbol(args, elem)
+            parse_symbol(elem)
         elif elem.tag.endswith('g'):
             # Some of this stuff isn't really necessary
-            if get_data_name(elem) not in ['GRID_NUMBERS', 'KINGDOM_MAPS',
-                                           'ATLAS_MAPS', 'MAP_GRIDS', 'HEXES']:
+            if get_data_name(elem) not in NO_DATA:
                 parse(args, f"{name}/{get_data_name(elem)}", elem, outfiles, size)
         elif elem.tag.endswith('MetaInfo'):
             pass
@@ -483,54 +493,45 @@ def parse(args, name, root, outfiles, size):
         elif elem.tag.endswith('linearGradient'):
             pass
         elif elem.tag.endswith('style'):
-            parse_style(args, elem.text)
+            parse_style(elem.text)
         elif elem.tag.endswith('image'):
             pass
         else:
-            print(f"{elem.tag} not expected")
+            LOGGER.error("%s not expected", elem.tag)
 
-def tests(args):
+def tests():
     """Collect all tests."""
     num_tests = 0
-    if args.verbose:
-        print("test simple scale 1")
+    print("test simple scale 1")
     assert attr2transform('scale(2,3)') == [2, 0, 0, 3, 0, 0], "simple scale 1"
     num_tests += 1
-    if args.verbose:
-        print("test simple scale 2")
+    print("test simple scale 2")
     assert attr2transform('scale(2)') == [2, 0, 0, 1, 0, 0], "simple scale 2"
     num_tests += 1
-    if args.verbose:
-        print("test simple matrix")
+    print("test simple matrix")
     assert attr2transform('matrix(2 3 4 5 6 7)') == [2, 3, 4, 5, 6, 7], "simple matrix"
     num_tests += 1
-    if args.verbose:
-        print("test simple translate 1")
+    print("test simple translate 1")
     assert attr2transform('translate(2 3)') == [1, 0, 0, 1, 2, 3], "simple translate 1"
     num_tests += 1
-    if args.verbose:
-        print("test simple translate 2")
+    print("test simple translate 2")
     assert attr2transform('translate(2)') == [1, 0, 0, 1, 2, 0], "simple translate 2"
     num_tests += 1
-    if args.verbose:
-        print("test rotate")
+    print("test rotate")
     assert numpy.allclose(attr2transform('rotate(30)'),
                           [.866, .5, -.5, .866, 0, 0],
                           atol=1e-3), f"simple matrix={attr2transform('rotate(30)')}"
     num_tests += 1
-    if args.verbose:
-        print("test rotate translate")
+    print("test rotate translate")
     assert numpy.allclose(attr2transform('rotate(90) translate(1)'),
                           [0, 1, -1, 0, 0, 1], atol=1e-3), f"order rotate translate"
     num_tests += 1
-    if args.verbose:
-        print("test translate rotate")
+    print("test translate rotate")
     assert numpy.allclose(attr2transform('translate(1) rotate(90)'),
                           [0, 1, -1, 0, 1, 0], atol=1e-3), "order translate rotate"
     num_tests += 1
     # Test special curve variants. Eyeball output.
-    if args.verbose:
-        print("test curves in svg paths")
+    print("test curves in svg paths")
     path = "M10,10C20,20 30,20 40,20c10,-10 20,-10 30,0" + \
         "s10,10 10,0q10,-10 10,0t10,0Z"
     svg = f'<svg><path d="{path}" stroke="black" stroke-width=".01" ' + \
@@ -538,9 +539,9 @@ def tests(args):
     with open("unittest.svg", 'w') as svg_test_out_file:
         print(svg, file=svg_test_out_file)
     test_outfiles = Outfiles()
-    with fiona.open("unittest.json", 'w', 'GeoJSON', schema=SCHEMA_LINES,
+    with fiona.open("unittest.json", 'w', 'GeoJSON', schema=LINES,
                     crs=CRS.from_epsg(4326)) as test_outfiles.lines:
-        elem = ElementTree.fromstring(svg)[0]
+        elem = xml.etree.ElementTree.fromstring(svg)[0]
         test_size = Size(0, 0, 1, 1)
         parse_path("type", elem, test_outfiles, test_size)
     num_tests += 1 # We came here
@@ -550,55 +551,49 @@ def main():
     """Main method."""
     parser = argparse.ArgumentParser(
         prog=sys.argv[0],
-        description='Convert Harn SVG to a few GIS formats.  ' +
-        'Use ogr2ogr to convert to other formats not compiled into fiona.')
-    parser.add_argument('-i', '--input', dest='infile', help='input file name',
-                        required=True)
-    parser.add_argument('-v', '--verbose', action='store_true', help='verbose',
-                        required=False)
-    parser.add_argument('-o', '--output', dest='outfile', help='output file name',
-                        required=True)
-    parser.add_argument('-T', '--test', action='store_true', help='run tests instead',
-                        required=False)
+        description='Convert Harn SVG to GeoJSON.'
+    )
+    parser.add_argument(
+        '-i', '--input', dest='infile', help='input file name', required=True
+    )
+    parser.add_argument(
+        '-o', '--output', dest='outpre', help='output files\' prefix', required=True
+    )
+    parser.add_argument(
+        '-l', '--log-level', default=logging.INFO, type=lambda x: getattr(logging, x),
+        help='configure log level'
+    )
+    parser.add_argument(
+        '-T', '--test', action='store_true', help='run tests instead', required=False
+    )
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
 
     if args.test:
-        tests(args)
+        tests()
     else:
-        root = ElementTree.parse(args.infile).getroot()
+        LOGGER.info("Replace some <span>s...")
+        subsfile = substitute_spans(args.infile, args.outpre)
+        LOGGER.info("Replace some <circle>s...")
+        subsfile = substitute_circles(subsfile, args.outpre)
+        LOGGER.info("Complete parse...")
+        root = xml.etree.ElementTree.parse(subsfile).getroot()
         el_a1 = root.find(".//*[@id='A1']")
         if el_a1 is None:
             el_a1 = root.find(".//*[@data-name='A1']")
-        size = Size(0, 0, 0, 0)
-        print(el_a1)
-        size.minx = float(el_a1.attrib.get('x', 0))
-        size.miny = float(el_a1.attrib.get('y', 0))
-        size.maxx = float(el_a1.attrib.get('x', 0)) + 14 * float(el_a1.attrib.get('width', 0))
-        size.maxy = float(el_a1.attrib.get('y', 0)) + 10 * float(el_a1.attrib.get('height', 0))
-        if args.outfile.endswith('.shp'):
-            if args.verbose:
-                print("output ESRI shapefile")
-            prefix = args.outfile[:-4]
-            ext = 'shp'
-            outformat = 'ESRI Shapefile'
-        elif args.outfile.endswith('.json'):
-            if args.verbose:
-                print("output GeoJSON")
-            prefix = args.outfile[:-5]
-            ext = 'json'
-            outformat = 'GeoJSON'
-        else:
-            print("Unkown extension, only .json (GeoJSON) or .shp (ESRI Shapefile) allowed. " +
-                  "Use ogr2ogr for other formats.")
-            sys.exit(-1)
-
+        size = Size(
+            float(el_a1.attrib.get('x', 0)), float(el_a1.attrib.get('y', 0)),
+            float(el_a1.attrib.get('x', 0)) + 14 * float(el_a1.attrib.get('width', 0)),
+            float(el_a1.attrib.get('y', 0)) + 10 * float(el_a1.attrib.get('height', 0))
+        )
+        crs = CRS.from_epsg(4326)
         outfiles = Outfiles()
-        with fiona.open(f"{prefix}_polys.{ext}", 'w', outformat,
-                        schema=SCHEMA_POLYGONS, crs=CRS.from_epsg(4326)) as outfiles.polygons:
-            with fiona.open(f"{prefix}_pts.{ext}", 'w', outformat,
-                            schema=SCHEMA_POINTS, crs=CRS.from_epsg(4326)) as outfiles.points:
-                with fiona.open(f"{prefix}_lines.{ext}", 'w', outformat,
-                                schema=SCHEMA_LINES, crs=CRS.from_epsg(4326)) as outfiles.lines:
+        fname = f"{args.outpre}_polygons.json"
+        with fiona.open(fname, 'w', 'GeoJSON', schema=POLYGONS, crs=crs) as outfiles.polygons:
+            fname = f"{args.outpre}_points.json"
+            with fiona.open(fname, 'w', 'GeoJSON', schema=POINTS, crs=crs) as outfiles.points:
+                fname = f"{args.outpre}_lines.json"
+                with fiona.open(fname, 'w', 'GeoJSON', schema=LINES, crs=crs) as outfiles.lines:
                     parse(args, '', root, outfiles, size)
 
 if __name__ == '__main__':

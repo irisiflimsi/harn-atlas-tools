@@ -3,10 +3,11 @@
 Evaluates the coast lines on the map. Does not work well with partial
 coast lines that are not closed.
 """
-import sys
 import inspect
-import argparse
-import psycopg2
+import logging
+from raw2ext import sql, shortest_connect
+
+LOGGER = logging.getLogger(__name__)
 
 # This EPS value is used to grow the coast, thereby overgrowing rivers
 # up to twice this width.  The coast is then shrunk by twice this
@@ -22,102 +23,61 @@ import psycopg2
 
 EPS = 0.006 # roughly 0.006 x 100km = 600m
 
-def shortest_connect(table, cursor, line_id):
-    """
-    Returns the id of the closest line, the type, the geometry of it,
-    of the original line, and of the connecting line.
-    """
-    cursor.execute(f"""
-        SELECT wkb_geometry FROM {table} WHERE id = {line_id}""")
-    line_geo = cursor.fetchall()[0][0]
-    p_11 = f"(1, ST_StartPoint('{line_geo}'::geometry))"
-    p_12 = f"(2, ST_EndPoint('{line_geo}'::geometry))"
-    p_21 = f"(1, ST_StartPoint(main.wkb_geometry))"
-    p_22 = f"(2, ST_EndPoint(main.wkb_geometry))"
-    cursor.execute(f"""
-      SELECT add_id, add_type, add_geo, line_geo, connect_geo FROM (
-        SELECT main.id, main.type, main.wkb_geometry, '{line_geo}', (
-          WITH pts1 (i, p) AS (VALUES {p_11}, {p_12}), 
-            pts2 (i, p) AS (VALUES {p_21}, {p_22})
-          SELECT ST_MakeLine(pt1.p, pt2.p) FROM pts1 AS pt1 CROSS JOIN pts2 AS pt2
-          WHERE (main.id <> {line_id} OR pt1.i <> pt2.i)
-          ORDER BY ST_Distance(pt1.p, pt2.p) ASC LIMIT 1
-        )
-        FROM {table} AS main
-      )
-      AS connects (add_id, add_type, add_geo, line_geo, connect_geo)
-      WHERE ST_Length(connects.connect_geo) < {EPS} AND (
-        connects.add_type LIKE '%COASTLINE%' OR connects.add_type = '0'
-      )
-      ORDER BY ST_Length(connects.connect_geo) ASC LIMIT 1
-    """)
-    ret = cursor.fetchall()
-    return ret
-
-def verbosity(verb, out):
-    """Verbosity."""
-    if verb:
-        print(out)
-
-def name_lake(args, cursor, lake_id):
+def name_lake(lines, lake_id):
     """Detect a named lake."""
-    cursor.execute(f"""
-      UPDATE {args.table}_lines SET name = 'Lake/Arain', type = 'Lake/4180'
+    sql(f"""
+      UPDATE {lines} SET name = 'Lake/Arain', type = 'Lake/4180'
       WHERE id = {lake_id} AND
         ST_Covers(ST_MakePolygon(wkb_geometry), ST_GeomFromText('POINT(-17.7 46.6)'))
       RETURNING id
     """)
-    if len(cursor.fetchall()) > 0:
-        print("Found Arain")
-    cursor.execute(f"""
-      UPDATE {args.table}_lines SET name = 'Lake/Tontury', type = 'Lake/520'
+    if len(sql()) > 0:
+        LOGGER.info("Found Arain")
+    sql(f"""
+      UPDATE {lines} SET name = 'Lake/Tontury', type = 'Lake/520'
       WHERE id = {lake_id} AND
         ST_Covers(ST_MakePolygon(wkb_geometry), ST_GeomFromText('POINT(-17.7 45.0)'))
       RETURNING id
     """)
-    if len(cursor.fetchall()) > 0:
-        print("Found Tontury")
+    if len(sql()) > 0:
+        LOGGER.info("Found Tontury")
 
-def make_valid_lake(args, cursor, geo, line_id):
+def make_valid_lake(lines, geo, line_id):
     """Handles Lakes. Update."""
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (
         nextval('serial'), 'nameless', '/COASTLINE/tmp-lake', '{geo}'::geometry
       )
       RETURNING id
     """)
-    lake_id = cursor.fetchall()[0][0]
-    verbosity(args.verbose, f"- lake {lake_id} from {line_id}")
-    name_lake(args, cursor, lake_id)
+    lake_id = sql()[0][0]
+    LOGGER.debug("- lake %s from %s", lake_id, line_id)
+    name_lake(lines, lake_id)
 
-def make_valid_line(table, cursor, merge, line_id):
+def make_valid_line(lines, merge, line_id):
     """Removes the smallest segments until a single line remains. Update."""
     multi_line = True
     while multi_line:
         sql_array = "'" + "'::geometry, '".join(merge) + "'::geometry"
-        cursor.execute(f"""
+        sql(f"""
           SELECT geo FROM (
             SELECT (ST_Dump(ST_LineMerge(ST_Union(ARRAY[{sql_array}])))).geom
           )
           AS lines (geo)
           ORDER BY ST_Length(geo) DESC
         """)
-        merge = cursor.fetchall()
+        merge = sql()
         if len(merge) == 1:
             break
         merge = [m[0] for m in merge[:-1]]
 
-    cursor.execute(f"""
-      UPDATE {table}
-      SET wkb_geometry = '{merge[0][0]}'::geometry
-      WHERE id = {line_id}
-    """)
+    sql(f"UPDATE {lines} SET wkb_geometry = '{merge[0][0]}'::geometry WHERE id = {line_id}")
 
-def encircle(args, cursor, isle_id):
+def encircle(lines, isle_id):
     """Make a valid polygon and extract rivers."""
-    verbosity(args.verbose, f"- {isle_id}")
-    cursor.execute(f"""
+    LOGGER.debug("- %s", isle_id)
+    sql(f"""
       SELECT river.id, (
         ST_Dump(
           ST_Intersection(
@@ -126,13 +86,13 @@ def encircle(args, cursor, isle_id):
           )
         )
       ).geom
-      FROM {args.table}_lines AS isle, {args.table}_lines AS river
+      FROM {lines} AS isle, {lines} AS river
       WHERE isle.id = {isle_id} AND (river.type LIKE '%COASTLINE%' OR river.type = '0') AND
         ST_Intersects(ST_MakePolygon(isle.wkb_geometry), river.wkb_geometry)
     """)
-    for river in cursor.fetchall():
-        cursor.execute(f"""
-          INSERT INTO {args.table}_lines (id, name, type, style, wkb_geometry)
+    for river in sql():
+        sql(f"""
+          INSERT INTO {lines} (id, name, type, style, wkb_geometry)
           VALUES (
             nextval('serial'), 'temporary area river',
             '/STREAMS-LAKE/tmp-river', 'fill: #36868d',
@@ -140,63 +100,53 @@ def encircle(args, cursor, isle_id):
           )
           RETURNING id
         """)
-        print(f"- new area river: {cursor.fetchall()[0][0]}")
-        cursor.execute(f"""
-          DELETE FROM {args.table}_lines WHERE id = {river[0]}
-        """)
+        LOGGER.debug("- new area river: %s", sql()[0][0])
+        sql(f"DELETE FROM {lines} WHERE id = {river[0]}")
 
-def execute(args, cursor):
+def execute(lines, polygons):
     """Top-level work-horse function. Connecting, Islands, then Lakes."""
-    cursor.execute(f"""
-      SELECT count(*) FROM {args.table}_lines WHERE type LIKE '%COASTLINE%'
-    """)
-    print(f"Identifying lines: {cursor.fetchall()[0][0]}")
+    sql(f"SELECT count(*) FROM {lines} WHERE type LIKE '%COASTLINE%'")
+    LOGGER.debug("Identifying lines: %s", sql()[0][0])
 
-    print("Remove fossils")
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines WHERE style = 'fill: #d4effc;'
-    """)
+    LOGGER.info("Remove fossils")
+    sql(f"DELETE FROM {lines} WHERE style = 'fill: #d4effc;'")
 
-    print("Validate lines")
-    cursor.execute(f"""
-      SELECT id, wkb_geometry FROM {args.table}_lines WHERE type LIKE '%COASTLINE%'
-    """)
-    lines = cursor.fetchall()
+    LOGGER.info("Validate lines")
+    sql(f"SELECT id, wkb_geometry FROM {lines} WHERE type LIKE '%COASTLINE%'")
+    rings = sql()
     # Consider self-intersecting lines
-    for line in lines:
-        make_valid_line(f"{args.table}_lines", cursor, [line[1]], line[0])
+    for ring in rings:
+        make_valid_line(lines, [ring[1]], ring[0])
 
     # Connect
-    print("Connect unlabeled and like-labelled lines")
-    cursor.execute(f"""
-      SELECT id FROM {args.table}_lines
+    LOGGER.info("Connect unlabeled and like-labelled lines")
+    sql(f"""
+      SELECT id FROM {lines}
       WHERE type LIKE '%COASTLINE%' AND NOT ST_IsClosed(wkb_geometry)
       ORDER BY id
     """)
-    lines = cursor.fetchall()
+    rings = sql()
     deleted = []
 
-    for line in lines:
-        if line[0] in deleted:
+    for ring in rings:
+        if ring[0] in deleted:
             continue
-        verbosity(args.verbose, f"- connect {line[0]}")
-        connect = shortest_connect(f"{args.table}_lines", cursor, line[0])
+        LOGGER.debug("- connect %s", ring[0])
+        connect = shortest_connect(lines, ring[0], 0, EPS)
         while len(connect) > 0:
-            verbosity(args.verbose, f"- - with {connect[0][0]}")
-            make_valid_line(f"{args.table}_lines", cursor, connect[0][2:], line[0])
-            if line[0] == connect[0][0]:
+            LOGGER.debug("- - with %s", connect[0][0])
+            make_valid_line(lines, connect[0][2:], ring[0])
+            if ring[0] == connect[0][0]:
                 break
-            verbosity(args.verbose, f"- - remove {connect[0][0]}")
-            cursor.execute(f"""
-              DELETE FROM {args.table}_lines WHERE id = {connect[0][0]}
-            """)
+            LOGGER.debug("- - remove %s", connect[0][0])
+            sql(f"DELETE FROM {lines} WHERE id = {connect[0][0]}")
             deleted.append(connect[0][0])
-            connect = shortest_connect(f"{args.table}_lines", cursor, line[0])
+            connect = shortest_connect(lines, ring[0], 0, EPS)
 
     # Islands
-    print(f"Special: Melderyn Isle")
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    LOGGER.info("Special: Melderyn Isle")
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       SELECT nextval('serial'), 'Coast/Melderyn', '0', geo FROM (
         SELECT (
           ST_Dump(
@@ -208,22 +158,22 @@ def execute(args, cursor):
             )
           )
         ).geom
-        FROM {args.table}_lines
+        FROM {lines}
         WHERE ST_IsClosed(wkb_geometry) AND type LIKE '%COASTLINE%' AND
           ST_Covers(ST_MakePolygon(wkb_geometry), ST_GeomFromText('POINT(-15.3 40.33)'))
       )
       AS lines (geo)
       RETURNING id, style
     """)
-    ids = cursor.fetchall()
+    ids = sql()
     if len(ids) > 0:
-        encircle(args, cursor, ids[0][0])
+        encircle(lines, ids[0][0])
     else:
-        print(f"- not found")
+        LOGGER.debug("- not found")
 
-    print(f"Special: Harnic Isle")
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    LOGGER.info("Special: Harnic Isle")
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       SELECT nextval('serial'), 'Coast/Harn', '0', geo FROM (
         SELECT (
           ST_Dump(ST_Boundary(ST_Union(ST_Buffer(ST_Buffer(geo, {EPS}), -2 * {EPS}), geo)))
@@ -233,7 +183,7 @@ def execute(args, cursor):
           SELECT ST_MakePolygon(ST_ExteriorRing((ST_Dump(geo)).geom)) AS geo FROM (
             SELECT ST_CollectionExtract(ST_Polygonize(geo), 3) AS geo FROM (
               SELECT ST_LineMerge(ST_MakeValid(ST_Union(wkb_geometry))) AS geo
-              FROM {args.table}_lines WHERE type LIKE '%COASTLINE%' OR type = '0'
+              FROM {lines} WHERE type LIKE '%COASTLINE%' OR type = '0'
             )
           )
         )
@@ -244,106 +194,94 @@ def execute(args, cursor):
       LIMIT 1
       RETURNING id
     """)
-    ids = cursor.fetchall()
+    ids = sql()
     if len(ids) > 0:
-        encircle(args, cursor, ids[0][0])
+        encircle(lines, ids[0][0])
     else:
-        print(f"- not found")
+        LOGGER.debug("- not found")
 
     # All closed is coast
-    cursor.execute(f"""
-      UPDATE {args.table}_lines AS tinner
+    sql(f"""
+      UPDATE {lines} AS tinner
       SET type = '0', name = 'Coast/nameless'
       WHERE type LIKE '%COASTLINE%' AND ST_IsClosed(wkb_geometry) AND
         NOT EXISTS (
-          SELECT wkb_geometry FROM {args.table}_lines AS touter
+          SELECT wkb_geometry FROM {lines} AS touter
           WHERE ST_IsClosed(touter.wkb_geometry) AND (type = '0' OR type LIKE '%COASTLINE%') AND
             ST_Covers(ST_MakePolygon(touter.wkb_geometry), tinner.wkb_geometry) AND
             tinner.id <> touter.id
         )
     """)
+    # Convert to polygons
+    LOGGER.info("Turn closed lines into polygons")
+    sql(f"""
+      INSERT INTO {polygons} (id, name, type, wkb_geometry)
+      SELECT nextval('serial'), 'Coast/nameless', '0', ST_MakePolygon(wkb_geometry)
+      FROM {lines}
+      WHERE type = '0' AND ST_IsClosed(wkb_geometry)
+      RETURNING type
+    """)
+    LOGGER.debug("Converted %s to polygons", len(sql()))
 
     # Lakes
     # Make smaller to "dry" rivers then bigger to create intersection with reality => take boundary
-    cursor.execute(f"""
+    sql(f"""
         SELECT id, geo FROM (
           SELECT id, (ST_Dump(ST_Boundary(ST_Intersection(
             ST_Buffer(ST_Buffer(ST_MakeValid(ST_MakePolygon(wkb_geometry)), -{EPS}), 2 * {EPS}),
               ST_MakeValid(ST_MakePolygon(wkb_geometry)))))).geom
-          FROM {args.table}_lines
+          FROM {lines}
           WHERE ST_IsClosed(wkb_geometry) AND
             (type LIKE '%COASTLINE%' OR type = '0' OR type LIKE '%tmp-river%') AND
             name NOT LIKE '%Coast/%')
         AS lines (id, geo)
         WHERE NOT ST_IsEmpty(geo)""")
-    polys = cursor.fetchall()
-    print(f"Lake potential lines: {len(polys)}")
+    polys = sql()
+    LOGGER.info("Lake potential lines: %s", len(polys))
     for poly in polys:
-        make_valid_lake(args, cursor, poly[1], poly[0])
+        make_valid_lake(lines, poly[1], poly[0])
 
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines AS tinner
-      USING (SELECT ST_MakePolygon(wkb_geometry) FROM {args.table}_lines WHERE name = 'main')
+    sql(f"""
+      DELETE FROM {lines} AS tinner
+      USING (SELECT ST_MakePolygon(wkb_geometry) FROM {lines} WHERE name = 'main')
       AS touter (geo)
       WHERE tinner.type = '0' AND tinner.name <> 'main' AND ST_Covers(touter.geo, tinner.wkb_geometry)
     """)
 
-    cursor.execute(f"""
-      SELECT count(*) FROM {args.table}_lines WHERE type LIKE '%COASTLINE%'
-    """)
-    print(f"Remaining lines: {cursor.fetchall()[0][0]}")
+    sql(f"SELECT count(*) FROM {lines} WHERE type LIKE '%COASTLINE%'")
+    LOGGER.info("Remaining lines: %s", sql()[0][0])
 
-def main():
-    """Main method."""
-    parser = argparse.ArgumentParser(
-        prog=sys.argv[0],
-        description='Create coast) lines from postgis database')
-    parser.add_argument(
-        '-d', '--database', dest='db', required=True,
-        help='db to connect to user:password@dbname:host:port')
-    parser.add_argument(
-        '-t', '--table', dest='table', required=True,
-        help='table prefix; _pts and _lines will be added')
-    parser.add_argument(
-        '-v', '--verbose', action='store_true',
-        help='verbose', required=False)
-    parser.add_argument(
-        '-T', '--test', action='store_true', help='run tests instead',
-        required=False)
-    args = parser.parse_args()
-
-    conn = psycopg2.connect(
-        user=f"{args.db.split('@')[0].split(':')[0]}",
-        password=f"{args.db.split('@')[0].split(':')[1]}",
-        database=f"{args.db.split('@')[1].split(':')[0]}",
-        host=f"{args.db.split('@')[1].split(':')[1]}",
-        port=f"{args.db.split('@')[1].split(':')[2]}")
-    cursor = conn.cursor()
+def tests(inpre):
+    """Test collector."""
+    lines = f"{inpre}_lines"
+    polygons = f"{inpre}_polygons"
 
     # Initialize
-    cursor.execute(f"""
-      CREATE TEMP SEQUENCE IF NOT EXISTS serial START 100000
-    """)
+    sql("CREATE TEMP SEQUENCE IF NOT EXISTS serial START 100000")
 
-    if args.test:
-        test_harnmain(args, cursor)
-        test_harnmelderyn(args, cursor)
-        test_harnlakes(args, cursor)
-        test_harnconnect(args, cursor)
-    else:
-        execute(args, cursor)
-        conn.commit()
+    test_harnmain(lines, polygons)
+    test_harnmelderyn(lines, polygons)
+    test_harnlakes(lines, polygons)
+    test_harnconnect(lines, polygons)
 
-def test_harnmain(args, cursor):
+def main(inpre):
+    """Main method."""
+    lines = f"{inpre}_lines"
+    polygons = f"{inpre}_polygons"
+
+    # Initialize
+    sql("CREATE TEMP SEQUENCE IF NOT EXISTS serial START 100000")
+
+    execute(lines, polygons)
+
+def test_harnmain(lines, polygons):
     """Test the pecularities of harn main."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines;
-      DELETE FROM {args.table}_polys
-    """)
+    sql(f"DELETE FROM {lines}; DELETE FROM {polygons}")
+
     # Connected river inlet 1
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (
         nextval('serial'), 'connect-1', '/COASTLINE/test',
         'LINESTRING(-17.110 43.00, -17.155 43.00, -17.155 42.00, -17.160 42.00,
@@ -352,8 +290,8 @@ def test_harnmain(args, cursor):
       )
     """)
     # Connected river inlet 2
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (
         nextval('serial'), 'connect-2', '/COASTLINE/test',
         'LINESTRING(-17.310 43.00, -17.400 43.00, -17.400 42.00,
@@ -361,14 +299,14 @@ def test_harnmain(args, cursor):
       )
     """)
     # Small and close island
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (
         nextval('serial'), 'island-coast', '/COASTLINE/test',
         'LINESTRING(-17.510 43.00, -17.580 43.00, -17.580 42.97,
                     -17.620 42.97, -17.620 43.00, -17.650 43.00)'::geometry
       );
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (
         nextval('serial'), 'island-island', '/COASTLINE/test',
         'LINESTRING(-17.590 42.99, -17.610 42.99, -17.610 42.98, -17.590 42.98,
@@ -376,8 +314,8 @@ def test_harnmain(args, cursor):
       )
     """)
     # Fake closure
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (
         nextval('serial'), 'unconnect-1', '/COASTLINE/test',
         'LINESTRING(-17.105 43.00, -16.900 43.00, -16.900 41.00,
@@ -386,43 +324,42 @@ def test_harnmain(args, cursor):
     """)
 
     # Test object
-    execute(args, cursor)
-    sel = f"SELECT count(*) FROM {args.table}_lines WHERE "
+    execute(lines, polygons)
+    sel = f"SELECT count(*) FROM {lines} WHERE "
     num_tests = 0
 
     # Main
     num_tests += 1
-    cursor.execute(f"""{sel}
+    sql(f"""{sel}
         type = '0' AND ST_IsClosed(wkb_geometry) AND
         ST_Contains(ST_MakePolygon(wkb_geometry), 'POINT(-17 42)'::geometry)
     """)
-    assert cursor.fetchall()[0][0] == 1
+    assert sql()[0][0] == 1
 
     # Small island
     num_tests += 1
-    cursor.execute(f"""{sel}
+    sql(f"""{sel}
         type = '0' AND ST_IsClosed(wkb_geometry) AND
         ST_Contains(ST_MakePolygon(wkb_geometry), 'POINT(-17.600 42.985)'::geometry)
     """)
-    assert cursor.fetchall()[0][0] == 1
+    assert sql()[0][0] == 1
 
     # Connected -> area river
     num_tests += 1
-    cursor.execute(f"""{sel}
+    sql(f"""{sel}
         type LIKE '%tmp-river%'
     """)
-    assert cursor.fetchall()[0][0] == 3
+    assert sql()[0][0] == 3
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
 
-def test_harnlakes(args, cursor):
+def test_harnlakes(lines, polygons):
     """Test the fallout of extracting Arain & Tontury."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines
-    """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"DELETE FROM {lines}")
+
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (
         nextval('serial'), 'All', '/COASTLINE/test',
         'LINESTRING(-19.000 48, -16.000 48, -16.000 42, -17.695 42,
@@ -435,134 +372,128 @@ def test_harnlakes(args, cursor):
     """)
 
     # Test object
-    execute(args, cursor)
-    sel = f"SELECT count(*) FROM {args.table}_lines WHERE "
+    execute(lines, polygons)
+    sel = f"SELECT count(*) FROM {lines} WHERE "
     num_tests = 0
 
-    cursor.execute(f"""{sel} name = 'Lake/Tontury' AND
+    sql(f"""{sel} name = 'Lake/Tontury' AND
         ST_Contains(ST_MakePolygon(wkb_geometry), 'POINT(-17.7 45.0)'::geometry)
     """)
     num_tests += 1
-    assert cursor.fetchall()[0][0] == 1
+    assert sql()[0][0] == 1
 
-    cursor.execute(f"""{sel} name = 'Lake/Arain' AND
+    sql(f"""{sel} name = 'Lake/Arain' AND
         ST_Contains(ST_MakePolygon(wkb_geometry), 'POINT(-17.7 46.6)'::geometry)
     """)
     num_tests += 1
-    assert cursor.fetchall()[0][0] == 1
+    assert sql()[0][0] == 1
 
-    cursor.execute(f"""{sel} name = 'Coast/Harn' AND
+    sql(f"""{sel} name = 'Coast/Harn' AND
         ST_Contains(ST_MakePolygon(wkb_geometry), 'POINT(-17 43)'::geometry)
     """)
     num_tests += 1
-    assert cursor.fetchall()[0][0] == 1
+    assert sql()[0][0] == 1
 
-    cursor.execute(f"""{sel} type LIKE '%tmp-river'""")
+    sql(f"""{sel} type LIKE '%tmp-river'""")
     num_tests += 1
-    assert cursor.fetchall()[0][0] == 1
+    assert sql()[0][0] == 1
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
 
-def test_harnmelderyn(args, cursor):
+def test_harnmelderyn(lines, polygons):
     """Test that Harn and Melderyn are indeed different."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines
-    """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"DELETE FROM {lines}")
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'melderyn', '/COASTLINE/melderyn',
         'LINESTRING(-15.2 40.2,-15.2 40.4,-15.4 40.4,-15.4 40.2,-15.2 40.2)'::geometry
       )
     """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'harn-0', '/COASTLINE/harn',
         'LINESTRING(-16 42,-16 44,-18 44,-18 42)'::geometry
       );
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'harn-0', '/COASTLINE/harn',
         'LINESTRING(-18 44,-18 42,-16 42,-16 44)'::geometry
       )
     """)
 
     # Test object
-    execute(args, cursor)
+    execute(lines, polygons)
 
-    sel = f"SELECT count(*) FROM {args.table}_lines WHERE "
+    sel = f"SELECT count(*) FROM {lines} WHERE "
     num_tests = 0
 
     # Melderyn
-    cursor.execute(f"""{sel} name = 'Coast/Melderyn' AND
+    sql(f"""{sel} name = 'Coast/Melderyn' AND
         ST_Contains(ST_MakePolygon(wkb_geometry), 'POINT(-15.3 40.33)'::geometry)
     """)
     num_tests += 1
-    assert cursor.fetchall()[0][0] == 1
+    assert sql()[0][0] == 1
 
     # Harn
-    cursor.execute(f"""{sel} name = 'Coast/Harn' AND
+    sql(f"""{sel} name = 'Coast/Harn' AND
         ST_Contains(ST_MakePolygon(wkb_geometry), 'POINT(-17 43)'::geometry)
     """)
     num_tests += 1
-    assert cursor.fetchall()[0][0] == 1
+    assert sql()[0][0] == 1
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
 
-def test_harnconnect(args, cursor):
+def test_harnconnect(lines, polygons):
     """Test some weird redraws that are all over the map."""
     # Priming test DB
-    cursor.execute(f"""
-      DELETE FROM {args.table}_lines
-    """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"DELETE FROM {lines}")
+
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'section-0', '/COASTLINE/test',
         'LINESTRING(-16.0001 41, -18.0001 41)'::geometry
       )
     """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'section-1', '/COASTLINE/test',
         'LINESTRING(-16.0002 41, -18.0002 41, -18.0003 43)'::geometry
       )
     """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'section-2', '/COASTLINE/test',
         'LINESTRING(-18.0003 41, -16.0004 41, -16.0005 43)'::geometry
       )
     """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'section-3', '/COASTLINE/test',
         'LINESTRING(-16.0004 43, -18.0006 43)'::geometry
       )
     """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'section-4', '/COASTLINE/test',
         'LINESTRING(-16.0005 43, -18.0007 43, -18.0008 41)'::geometry
       )
     """)
-    cursor.execute(f"""
-      INSERT INTO {args.table}_lines (id, name, type, wkb_geometry)
+    sql(f"""
+      INSERT INTO {lines} (id, name, type, wkb_geometry)
       VALUES (nextval('serial'), 'section-5', '/COASTLINE/test',
         'LINESTRING(-18.0006 43, -16.0009 43, -16.0010 41)'::geometry
       )
     """)
 
     # Test object
-    execute(args, cursor)
+    execute(lines, polygons)
 
-    sel = f"SELECT count(*) FROM {args.table}_lines WHERE "
+    sel = f"SELECT count(*) FROM {lines} WHERE "
     num_tests = 0
 
     # Main
     num_tests += 1
-    cursor.execute(f"""{sel} type = '0'""")
-    assert cursor.fetchall()[0][0] == 1
+    sql(f"{sel} type = '0'")
+    assert sql()[0][0] == 1
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
-
-if __name__ == '__main__':
-    main()

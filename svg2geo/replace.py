@@ -1,12 +1,11 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 """
-Extract additional information
+Extract additional information.
 """
 from dataclasses import dataclass
-import argparse
-import sys
 import re
+import os
 
 @dataclass
 class Buffer:
@@ -66,15 +65,12 @@ def graph2char(line, repl, strg, location):
             location = [mat.group(1), mat.group(2)]
     return ret, location
 
-def print_continue(text, out_file):
-    """Print and reset."""
-    print(text, end='', file=out_file)
-
-def substitute_spans(args):
+def substitute_spans(infile, outpre):
     """Replace all <span/> names."""
-    svg_out_file = open(args.midfile, 'w')
+    svg_infile = open(infile, 'r')
+    svg_outfile = open(outpre + ".svg.tmp", 'w')
     buf = Buffer(loc=[0, 0])
-    for new_line in open(args.infile, 'r'):
+    for new_line in svg_infile:
         new_txt = new_line
         buf.lines += new_line
 
@@ -87,7 +83,7 @@ def substitute_spans(args):
         if len(buf.txt) > 5:
             new_line = f'<circle class="" cx="{buf.loc[0]}" cy="{buf.loc[1]}" ' + \
                 f'data-name="PeakName/{buf.txt}"/>\n' + new_txt
-            print_continue(new_line, svg_out_file)
+            print(new_line, end='', file=svg_outfile)
             buf = Buffer(loc=[0, 0])
             continue
 
@@ -102,23 +98,29 @@ def substitute_spans(args):
             new_txt
         )
         if new_txt != buf.lines.rstrip():
-            print_continue(new_txt, svg_out_file)
-            print('', file=svg_out_file) # CR
+            print(new_txt, end='', file=svg_outfile)
+            print('', file=svg_outfile) # CR
             buf = Buffer(loc=[0, 0])
             continue
 
-        print_continue(buf.lines, svg_out_file)
+        print(buf.lines, end='', file=svg_outfile)
         buf = Buffer(loc=[0, 0])
 
-def substitute_circles(args):
+    svg_infile.close()
+    svg_outfile.close()
+    os.rename(outpre + ".svg.tmp", outpre + ".svg")
+    return outpre + ".svg"
+
+def substitute_circles(infile, outpre):
     """Connect circle Names that have y-distance of 6."""
-    svg_out_file = open(args.outfile, 'w')
+    svg_infile = open(infile, 'r')
+    svg_outfile = open(outpre + ".svg.tmp", 'w')
     bline = ''
     og_1 = ''
     og_2 = ''
     og_3 = ''
     og_4 = ''
-    for line0 in open(args.midfile, 'r'):
+    for line0 in svg_infile:
         mat = re.match(
             r'<circle class="cls-(.*)" cx="(.*)" cy="(.*)" data-name="AnyName/(.*)"/>', line0
         )
@@ -128,36 +130,21 @@ def substitute_circles(args):
                 g_4 = og_4.strip() + g_4.strip()
                 print(
                     f'<circle class="" cx="{og_2}" cy="{og_3}" data-name="AnyName/{g_4}"/>',
-                    end='\n', file=svg_out_file
+                    end='\n', file=svg_outfile
                 )
                 bline = ''
                 og_1 = ''
             else:
-                print(bline, end='', file=svg_out_file)
+                print(bline, end='', file=svg_outfile)
                 [og_1, og_2, og_3, og_4] = [g_1, g_2, g_3, g_4]
                 bline = line0
         else:
-            print(bline, end='', file=svg_out_file)
-            print(line0, end='', file=svg_out_file)
+            print(bline, end='', file=svg_outfile)
+            print(line0, end='', file=svg_outfile)
             bline = ''
             og_1 = ''
 
-def main():
-    """Main method."""
-    parser = argparse.ArgumentParser(
-        prog=sys.argv[0],
-        description='Convert Harn SVG to a few GIS formats.  ' +
-        'Use ogr2ogr to convert to other formats not compiled into fiona.')
-    parser.add_argument('-i', '--input', dest='infile', help='input file name',
-                        required=True)
-    parser.add_argument('-v', '--verbose', action='store_true', help='verbose',
-                        required=False)
-    parser.add_argument('-o', '--output', dest='outfile', help='output file name',
-                        required=True)
-    args = parser.parse_args()
-    args.midfile = args.outfile + "-0"
-    substitute_spans(args)
-    substitute_circles(args)
-
-if __name__ == '__main__':
-    main()
+    svg_infile.close()
+    svg_outfile.close()
+    os.rename(outpre + ".svg.tmp", outpre + ".svg")
+    return outpre + ".svg"
