@@ -187,9 +187,28 @@ following zoom ranges. A best guess for Harn nomenclature is attached.
 (The *Domain* size is missing in Harn maps and is made up for the
 purpose of this project.)
 
-* 0-3: World      ( 1 :  70M )
-* 5-7: Regional   ( 1 :   4M )
-* 8-11: Atlas     ( 1 : 250k )
-* 12-15: Domain   ( 1 :  15k )
-* 16-19: Local    ( 1 :   1k )
-* 20-23: Interior ( 1 :  64  )
+| Zoom  | Label    | High Scale |
+| :---: | :------: | :--------: |
+|  0-3  | World    | 1 :  70M   | 
+|  5-7  | Regional | 1 :   4M   |
+|  8-11 | Atlas    | 1 : 250k   |
+| 12-15 | Domain   | 1 :  15k   |
+| 16-19 | Local    | 1 :   1k   |
+| 20-23 | Interior | 1 :  64    |
+
+Raster ids are built as concatenation of as *text* type, separated by
+'.'.  Square indexes are always counted in the positive direction.
+Rasters start at the Atlas level only.  Longitude is positive only,
+because passing a leading '-' as argument is hard.
+
+* 0-360 (longitude) by -90-90 (latitude) - *atlas*
+* 0-15 (16x16 lon by lat of 1x1 degree square) - *domain*
+* 0-15 (16x16 lon by lat of previous square) - *local*
+
+A typical area specification: `-16.40.0.0,-16.40.15.15`
+
+The whole procedure takes a while, and since Melderyn is the only
+completed relevant isle, these are some reasonable calls:
+
+    python ext2pres -i raw -o pres -A 343.40,344.41
+    python ext2pres -i raw -o pres -A 344.40.2.6.9.5,344.40.2.6.11.7
