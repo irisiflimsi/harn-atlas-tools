@@ -223,8 +223,9 @@ def read_sqlraster(raster, raster_id, band):
         return None
     return numpy.asarray(result[0][0])
 
-def init_displace(displace, randf=random.uniform):
+def init_displace(displace, randf=random.uniform, rseed=0):
     """Initialize the (rest of the) displacement matrix."""
+    random.seed(rseed)
     if displace[0][0] == NO_DATA:
         displace[0][0] = 500 * randf(-1, 1)
     if displace[RAS_SIZE][0] == NO_DATA:
@@ -235,6 +236,13 @@ def init_displace(displace, randf=random.uniform):
         displace[RAS_SIZE][RAS_SIZE] = 500 * randf(-1, 1)
     fractal(displace, (0, 0), (RAS_SIZE, RAS_SIZE), 250, randf)
     return displace
+
+def seed(pts):
+    """Generate a seed for an array that varies on last level."""
+    rseed = 0
+    for i in pts:
+        rseed = 1000 * rseed + i
+    return rseed
 
 def fractal(height, p_0, p_1, depth, randf):
     """Fractalize down. Include all corners."""
@@ -388,7 +396,7 @@ def calc_local(rasters, pts):
     LOGGER.debug("top %s", displace[:, RAS_SIZE])
 
     # Fill remainder
-    displace = init_displace(displace)
+    displace = init_displace(displace, seed(pts))
     LOGGER.debug("random %s", displace)
 
     domain_id = ".".join([str(p) for p in pts[0:4]])
@@ -467,7 +475,7 @@ def calc_domain(rasters, pts):
     LOGGER.debug("top %s", displace[:, RAS_SIZE])
 
     # Fill remainder
-    displace = init_displace(displace)
+    displace = init_displace(displace, seed(pts))
     LOGGER.debug("random %s", displace)
 
     atlas_id = ".".join([str(p) for p in pts[0:2]])
@@ -550,7 +558,7 @@ def calc_atlas(rasters, polygons, points, pts):
     LOGGER.debug("top %s", displace[:, RAS_SIZE])
 
     # Fill remainder
-    displace = init_displace(displace)
+    displace = init_displace(displace, seed(pts))
     LOGGER.debug("random %s", displace)
 
     field = calc_atlasfield(polygons, points, pts, displace)
@@ -601,6 +609,7 @@ def main(inpre, outpre, lb_a, ru_a):
 
 def tests():
     """Tests."""
+    seed_tests()
     fractal_tests()
     neighbor_tests1()
     neighbor_tests2()
@@ -610,6 +619,48 @@ def tests():
     interpolation_tests3()
     side_tests1()
     side_tests2()
+
+def seed_tests():
+    """Test different seeds at lowest level."""
+    num_tests = 0
+
+    num_tests += 1
+    s_1 = seed((-10, -10, 10, 10, 0, 0))
+    s_2 = seed((-10, -10, 10, 10, 0, 1))
+    s_3 = seed((-10, -10, 10, 10, 0, 2))
+
+    s_5 = seed((-10, -10, 10, 10, 1, 0))
+    s_6 = seed((-10, -10, 10, 10, 2, 0))
+
+    assert(s_1 != s_2 and s_2 != s_3 and s_1 != s_3)
+    assert(s_1 != s_5 and s_5 != s_6 and s_1 != s_6)
+    assert(s_2 != s_5 and s_2 != s_6 and s_3 != s_5 and s_3 != s_6)
+
+    num_tests += 1
+    s_1 = seed((-10, -10, 0, 0))
+    s_2 = seed((-10, -10, 0, 1))
+    s_3 = seed((-10, -10, 0, 2))
+
+    s_5 = seed((-10, -10, 1, 0))
+    s_6 = seed((-10, -10, 2, 0))
+
+    assert(s_1 != s_2 and s_2 != s_3 and s_1 != s_3)
+    assert(s_1 != s_5 and s_5 != s_6 and s_1 != s_6)
+    assert(s_2 != s_5 and s_2 != s_6 and s_3 != s_5 and s_3 != s_6)
+
+    num_tests += 1
+    s_1 = seed((0, 0))
+    s_2 = seed((0, 1))
+    s_3 = seed((0, 2))
+
+    s_5 = seed((1, 0))
+    s_6 = seed((2, 0))
+
+    assert(s_1 != s_2 and s_2 != s_3 and s_1 != s_3)
+    assert(s_1 != s_5 and s_5 != s_6 and s_1 != s_6)
+    assert(s_2 != s_5 and s_2 != s_6 and s_3 != s_5 and s_3 != s_6)
+
+    print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
 
 def fractal_tests():
     """Fractal simple tests."""

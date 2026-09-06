@@ -17,6 +17,7 @@ from fiona.crs import CRS
 from shapely.geometry import LineString, mapping, Point, Polygon
 from scipy.spatial import distance
 from svg2geo.replace import substitute_spans, substitute_circles
+import svg2geo.local
 
 @dataclass
 class Outfiles:
@@ -566,12 +567,19 @@ def main():
     parser.add_argument(
         '-T', '--test', action='store_true', help='run tests instead', required=False
     )
+    parser.add_argument(
+        '-s', '--scale', dest='scale', help='atlas(default) or local', required=False
+    )
+
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
     if args.test:
         tests()
     else:
+        if args.scale == "local":
+            svg2geo.local.main(args)
+            return
         LOGGER.info("Replace some <span>s...")
         subsfile = substitute_spans(args.infile, args.outpre)
         LOGGER.info("Replace some <circle>s...")
