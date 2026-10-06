@@ -31,6 +31,9 @@ def main():
     parser.add_argument(
         '-T', '--test', action='store_true', help='run tests instead', required=False
     )
+    parser.add_argument(
+        '-s', '--scale', dest='scale', help='atlas(default) or local', required=False
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
@@ -52,11 +55,12 @@ def main():
         subprocess.run(
             cmd + [f'{ipre}polygons.json', '-nln', f'{opre}polygons'], check=True
         )
-        LOGGER.info("Add dummies...")
-        dummies = open('geo2raw/dummies.sql', 'r')
-        for dummy in dummies:
-            dummy = dummy.replace('raw_lines', f'{opre}lines')
-            subprocess.run(['psql', geo2raw.DBC2, '-c', dummy], check=False)
+        if args.scale != "local":
+            LOGGER.info("Add dummies...")
+            dummies = open('geo2raw/dummies.sql', 'r')
+            for dummy in dummies:
+                dummy = dummy.replace('raw_lines', f'{opre}lines')
+                subprocess.run(['psql', geo2raw.DBC2, '-c', dummy], check=False)
 
         srid0 = "UpdateGeometrySRID"
         subprocess.run(

@@ -13,6 +13,7 @@ import raw2ext.lakes
 import raw2ext.roads
 import raw2ext.flora
 import raw2ext.rivers
+import raw2ext.local
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +50,9 @@ def main():
     parser.add_argument(
         '-T', '--test', action='store_true', help='run tests instead'
     )
+    parser.add_argument(
+        '-s', '--scale', dest='scale', help='atlas(default) or local', required=False
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=args.loglevel, format='%(relativeCreated).0f %(name)s:%(lineno)d %(message)s'
@@ -58,6 +62,10 @@ def main():
     if args.test:
         tests(extract, args.inpre)
     else:
+        if args.scale == "local":
+            raw2ext.local.main(args.inpre)
+            raw2ext.CONNECT.commit()
+            return
         if 'contours' in extract:
             raw2ext.contours.main(args.inpre)
             raw2ext.CONNECT.commit()

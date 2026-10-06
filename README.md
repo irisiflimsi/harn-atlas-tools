@@ -42,6 +42,7 @@ The script also evaluates style information to be considered in
 heuristics later.
 
     python svg2geo -i ~/HarnAtlas-Clean-01.91.svg -o geo
+    python svg2geo -i ~/Cherafir-final3.svg -s local -o geol
 
 ### geo2raw
 
@@ -55,6 +56,7 @@ This script includes a (fake) closed coastline and benefits coast and
 river calculations.
 
     python geo2raw -i geo -o raw
+    python geo2raw -i geol -s local -o rawl
 
 ### raw2ext
 
@@ -74,6 +76,12 @@ Extraction list entries are lower case and white space is not allowed
 between entries.
 
     python raw2ext -i raw -e contours,names,coast,lakes,roads,flora,rivers
+    python raw2ext -i rawl -e abc -s local
+
+If you use `-s local` the `-e` switch is ignored.  It currently
+extracts houses, towers, and contours.  A few artifacts (e.g. the
+legend) are thrown away.  It is "hard-coded" towards the current
+Cherafir SVG.
 
 #### Contours
 

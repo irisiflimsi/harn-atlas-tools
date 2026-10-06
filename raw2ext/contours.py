@@ -6,29 +6,12 @@ for connected lines and rings.
 """
 import logging
 import inspect
-from raw2ext import sql, shortest_connect
+from raw2ext import sql, shortest_connect, make_valid
 
 LOGGER = logging.getLogger(__name__)
 
 EPSP = 0.0025
 EPSL = 0.007
-
-def make_valid(lines, merge, line_id):
-    """Removes the smallest segments until a single line remains. Update."""
-    multi_line = True
-    while multi_line:
-        sql_array = "'" + "'::geometry, '".join(merge) + "'::geometry"
-        sql(f"""
-          SELECT geo
-          FROM (SELECT (ST_Dump(ST_LineMerge(ST_Union(ARRAY[{sql_array}])))).geom)
-          AS lines (geo) ORDER BY ST_Length(geo) DESC
-        """)
-        merge = sql()
-        if len(merge) == 1:
-            break
-        merge = [m[0] for m in merge[:-1]]
-
-    sql(f"UPDATE {lines} SET wkb_geometry = '{merge[0][0]}'::geometry WHERE id = {line_id}")
 
 def sort_elevation_pts(table):
     """Sort all elevation points to their elevation."""

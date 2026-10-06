@@ -46,13 +46,13 @@ NUM1M = r' ?,?([^ ,]+)'
 NUM2 = NUM1 + NUM1
 NUM4 = NUM2 + NUM2
 NUM6 = NUM4 + NUM2
-NUM6M = NUM1M + NUM1M + NUM1M + NUM1M + NUM1M + NUM1M + NUM1M + NUM1M
+NUM6M = NUM1M + NUM1M + NUM1M + NUM1M + NUM1M + NUM1M
 
 LOGGER = logging.getLogger(__name__)
 
 DEFS = {}
 PX_100FT = 1
-FT_DEG = 3*100*1000
+FT_DEG = 3*100*1100
 
 CENTERS = {}
 CENTERS["Cherafir"] = (-15.833, 40.400)
@@ -60,10 +60,15 @@ CENTERS["Cherafir"] = (-15.833, 40.400)
 def transform(mat, x_c, y_c):
     """This is where the projection is 'hidden'."""
     pts = (
-        CENTERS["Cherafir"][0] + (mat[0]*x_c + mat[2]*y_c + mat[4]) / PX_100FT / 100 / FT_DEG,
-        CENTERS["Cherafir"][1] - (mat[1]*x_c + mat[3]*y_c + mat[5]) / PX_100FT / 100 / FT_DEG
+        CENTERS["Cherafir"][0] + (mat[0]*x_c + mat[2]*y_c + mat[4]) / PX_100FT * 100 / FT_DEG,
+        CENTERS["Cherafir"][1] - (mat[1]*x_c + mat[3]*y_c + mat[5]) / PX_100FT * 100 / FT_DEG
     )
     return pts
+
+def transform_r(mat, r):
+    """This is where the projection is 'hidden'."""
+    # We do not treat ellipses!
+    return mat[0]*r / PX_100FT * 100 / FT_DEG
 
 def attr2transform(attr):
     """Handle transform attribute."""
@@ -288,13 +293,19 @@ def parse_path(elem, outfiles, defs):
             path = ""
     out_line(line, outfiles, elem, defs)
 
+def get_attributes(elem):
+    """Get standard attibutes."""
+    typ = f"fill:{elem.attrib.get('fill', '-')};"
+    typ += f"stroke:{elem.attrib.get('stroke', '-')};"
+    typ += f"stroke-width:{elem.attrib.get('stroke-width', '1')};"
+    return typ
+
 def out_line(line, outfiles, elem, defs):
     """Terminate a line in path."""
     if len(line) > 1:
         line_string = LineString(line)
         SID.inc_sid()
-        typ = f"stroke={elem.attrib.get('stroke', '-')};"
-        typ += f"stroke-width={elem.attrib.get('stroke-width', '1')}"
+        typ = get_attributes(elem)
         if defs:
             DEFS[elem.attrib['id']] = line_string
         else:
@@ -319,8 +330,9 @@ def parse_polygon(elem, outfiles):
     if len(line) > 1:
         polygon = Polygon(line)
         SID.inc_sid()
+        typ = get_attributes(elem)
         outfiles.polygons.write(
-            {'geometry': mapping(polygon), 'properties': {'id': SID.get_sid(), 'type': '-'}}
+            {'geometry': mapping(polygon), 'properties': {'id': SID.get_sid(), 'type': typ}}
         )
     else:
         LOGGER.warning("ignoring polygon: %s", points)
@@ -340,7 +352,7 @@ def parse_rect(elem, outfiles, defs):
     line.append(transform(mat, x_2, y_1))
     polygon = Polygon(line)
     SID.inc_sid()
-    typ = elem.attrib.get('fill', '-')
+    typ = get_attributes(elem)
     if defs:
         DEFS[elem.attrib['id']] = polygon
     else:
@@ -354,6 +366,7 @@ def parse_clip(elem, outfiles, root):
     group = root.findall(f".//*[@clip-path='url(#{elem.attrib['id']})']")
     if group is not None:
         typ = group[0].attrib.get('id', '-')
+        SID.inc_sid()
         if isinstance(string, LineString):
             outfiles.lines.write(
                 {'geometry': mapping(string), 'properties': {'id': SID.get_sid(), 'type': typ}}
@@ -371,7 +384,8 @@ def parse_point(elem, outfiles):
     if elem.tag.endswith('circle'):
         x_c = float(elem.attrib['cx'])
         y_c = float(elem.attrib['cy'])
-        typ = "radius=" + elem.attrib['r']
+        typ = f"radius:{transform_r(mat, float(elem.attrib['r']))};"
+        typ += get_attributes(elem)
     elif elem.tag.endswith('text'):
         x_c = float(elem.attrib.get('x', 0))
         y_c = float(elem.attrib.get('y', 0))
@@ -417,8 +431,9 @@ def parse_line(elem, outfiles):
     if len(line) > 1:
         line_string = LineString(line)
         SID.inc_sid()
+        typ = get_attributes(elem)
         outfiles.lines.write(
-            {'geometry': mapping(line_string), 'properties': {'id': SID.get_sid(), 'type': '-'}}
+            {'geometry': mapping(line_string), 'properties': {'id': SID.get_sid(), 'type': typ}}
         )
     else:
         LOGGER.error("pathological:%s", SID.get_sid())
@@ -438,8 +453,7 @@ def parse(args, root, outfiles, real_root, defs=False):
         elif elem.tag.endswith('defs') and not defs:
             parse(args, elem, outfiles, real_root, True)
         elif elem.tag.endswith('g') and not defs:
-            if elem.attrib.get('id', '') != 'Border' and \
-               elem.attrib.get('id', '') != 'Legend':
+            if elem.attrib.get('id', '') != 'Legend':
                 parse(args, elem, outfiles, real_root)
         elif elem.tag.endswith('text') and not defs:
             parse_point(elem, outfiles)
@@ -451,6 +465,10 @@ def parse(args, root, outfiles, real_root, defs=False):
             pass
         elif elem.tag.endswith('feFlood') and not defs:
             pass
+        elif elem.tag.endswith('image') and not defs:
+            pass
+        elif elem.tag.endswith('pgf') and not defs:
+            pass
         elif elem.tag.endswith('feBlend') and not defs:
             pass
         elif elem.tag.endswith('filter', defs) and defs:
@@ -459,6 +477,8 @@ def parse(args, root, outfiles, real_root, defs=False):
             parse_rect(elem, outfiles, defs)
         elif elem.tag.endswith('path', defs):
             parse_path(elem, outfiles, defs)
+        elif elem.tag.endswith('switch', defs):
+            parse(args, elem, outfiles, real_root)
         else:
             LOGGER.error("%s not expected", elem.tag)
 
