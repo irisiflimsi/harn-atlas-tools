@@ -1,7 +1,7 @@
 #!/usr/bin/python
 """
 Convert a 'Harn Local Map' SVG into GeoJSON format.  Currently
-only avaibale for Cherafir.  Also read the help.
+only available for Cherafir.  Also read the help.
 """
 import re
 import sys
@@ -55,7 +55,7 @@ PX_100FT = 1
 FT_DEG = 3*100*1100
 
 CENTERS = {}
-CENTERS["Cherafir"] = (-15.833, 40.400)
+CENTERS["Cherafir"] = (-15.836, 40.398)
 
 def transform(mat, x_c, y_c):
     """This is where the projection is 'hidden'."""
@@ -122,7 +122,7 @@ def get_href(elem):
     """Get href and replace with used def."""
     return DEFS[elem.attrib.get('{http://www.w3.org/1999/xlink}href', '-')[1:]]
 
-def parse_path(elem, outfiles, defs):
+def parse_path(elem, outfiles, defs=None):
     """Parse path and write to file as line."""
     x_c = y_c = x0_c = y0_c = xb_c = yb_c = 0
     mat = [1, 0, 0, 1, 0, 0]
@@ -300,7 +300,7 @@ def get_attributes(elem):
     typ += f"stroke-width:{elem.attrib.get('stroke-width', '1')};"
     return typ
 
-def out_line(line, outfiles, elem, defs):
+def out_line(line, outfiles, elem, defs=None):
     """Terminate a line in path."""
     if len(line) > 1:
         line_string = LineString(line)
@@ -337,7 +337,7 @@ def parse_polygon(elem, outfiles):
     else:
         LOGGER.warning("ignoring polygon: %s", points)
 
-def parse_rect(elem, outfiles, defs):
+def parse_rect(elem, outfiles, defs=None):
     """Parse polygon and write to file."""
     line = []
     mat = attr2transform(elem.attrib.get('transform', '-'))
@@ -376,7 +376,7 @@ def parse_clip(elem, outfiles, root):
                 {'geometry': mapping(string), 'properties': {'id': SID.get_sid(), 'type': typ}}
             )
 
-def parse_point(elem, outfiles):
+def parse_point(elem, outfiles, id=None):
     """Parse point and write to file."""
     x_c = y_c = w_c = h_c = 0
     typ = '-'
@@ -389,7 +389,9 @@ def parse_point(elem, outfiles):
     elif elem.tag.endswith('text'):
         x_c = float(elem.attrib.get('x', 0))
         y_c = float(elem.attrib.get('y', 0))
-        typ = elem.text if elem.text is not None else ''
+        if id is not None:
+            typ = id + " "
+        typ += elem.text if elem.text is not None else ''
         for child in elem.findall('*'): # all tspan
             typ += " " + child.text
     elif elem.tag.endswith('ellipse'):
@@ -438,7 +440,7 @@ def parse_line(elem, outfiles):
     else:
         LOGGER.error("pathological:%s", SID.get_sid())
 
-def parse(args, root, outfiles, real_root, defs=False):
+def parse(args, root, outfiles, real_root, defs=False, id=None):
     """Parse and write everything to the files."""
     # Replace
     for elem in list(root):
@@ -454,9 +456,9 @@ def parse(args, root, outfiles, real_root, defs=False):
             parse(args, elem, outfiles, real_root, True)
         elif elem.tag.endswith('g') and not defs:
             if elem.attrib.get('id', '') != 'Legend':
-                parse(args, elem, outfiles, real_root)
+                parse(args, elem, outfiles, real_root, None, elem.attrib.get('id', ''))
         elif elem.tag.endswith('text') and not defs:
-            parse_point(elem, outfiles)
+            parse_point(elem, outfiles, id)
         elif elem.tag.endswith('mask') and not defs:
             pass
         elif elem.tag.endswith('clipPath') and not defs:
@@ -471,16 +473,16 @@ def parse(args, root, outfiles, real_root, defs=False):
             pass
         elif elem.tag.endswith('feBlend') and not defs:
             pass
-        elif elem.tag.endswith('filter', defs) and defs:
+        elif elem.tag.endswith('filter') and defs:
             parse(args, elem, outfiles, real_root)
         elif elem.tag.endswith('rect'):
             parse_rect(elem, outfiles, defs)
-        elif elem.tag.endswith('path', defs):
+        elif elem.tag.endswith('path'):
             parse_path(elem, outfiles, defs)
-        elif elem.tag.endswith('switch', defs):
+        elif elem.tag.endswith('switch') and not defs:
             parse(args, elem, outfiles, real_root)
         else:
-            LOGGER.error("%s not expected", elem.tag)
+            LOGGER.error("%s not expected with %s", elem.tag, elem.attrib)
 
 def main(args):
     """Main method."""

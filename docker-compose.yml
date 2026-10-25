@@ -32,3 +32,4 @@ services:
       - RUN_UNPRIVILEGED=true
     volumes:
       - ./geo_data:/opt/geoserver_data
+

@@ -8,6 +8,7 @@ import argparse
 import re
 import sys
 import ext2pres.raster
+import ext2pres.localraster
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,7 +46,10 @@ def main():
         '-o', '--outpre', dest='outpre', help='output tables\' prefix', required=True
     )
     parser.add_argument(
-        '-A', '--area', dest='area', help='area to create, see README', required=True
+        '-A', '--area', dest='area', help='area to create, see README', required=False
+    )
+    parser.add_argument(
+        '-s', '--scale', dest='scale', help='atlas(default) or local', required=False
     )
     parser.add_argument(
         '-l', '--log-level', dest='loglevel', default=logging.INFO,
@@ -60,8 +64,19 @@ def main():
     )
 
     if args.test:
-        ext2pres.raster.tests()
+#        ext2pres.raster.tests()
+        ext2pres.localraster.tests()
         return
+
+    outpre = args.outpre
+
+    if args.scale == "local":
+        ext2pres.localraster.main(args.inpre, outpre)
+        ext2pres.CONNECT.commit()
+        return
+    if args.area is None:
+        print("Specify either '-A' or '-s'")
+        sys.exit(1)
 
     (lb_s, ru_s) = args.area.split(",")
     lb_a = match_loc(lb_s)
@@ -75,9 +90,6 @@ def main():
     if lb_a[0] > ru_a[0] or lb_a[1] > ru_a[1]:
         print("incorrectly ordered area arguments ")
         sys.exit(1)
-
-    inpre = args.inpre
-    outpre = args.outpre
 
     # Initialize
     ext2pres.sql(f"""
@@ -98,7 +110,7 @@ def main():
         USING GIST(ST_Envelope(raster));
     """)
 
-    ext2pres.raster.main(inpre, outpre, lb_a, ru_a)
+    ext2pres.raster.main(args.inpre, outpre, lb_a, ru_a)
     ext2pres.CONNECT.commit()
 
 if __name__ == '__main__':

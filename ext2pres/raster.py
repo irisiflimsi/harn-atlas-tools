@@ -6,12 +6,11 @@ import random
 import logging
 import math
 import inspect
-import os.path
 from enum import Enum
 import numpy
-import rasterio
 import ext2pres
-from ext2pres import sql
+from ext2pres import sql, calc_bary, read_geotiff, write_geotiff, write_sql, read_sql
+from ext2pres import NO_DATA, RASTER_SIZE, L2D, D2A
 
 class Dir(Enum):
     """Direction."""
@@ -20,20 +19,13 @@ class Dir(Enum):
     TOP = 3
     DOWN = 4
 
-LOGGER = logging.getLogger(__name__)
+# Height random deviation. Consider local show 10ft, atlas 500ft
+# contours.
+ATLAS_DEV_H = 128
+DOMAIN_DEV_H = 32
+LOCAL_DEV_H = 4
 
-# We do two things: we calculate 1km pixels exactly and randomize
-# inbetween to give a more natural feel.  Since 1 degree is roughly
-# 100km, 1km = 1/100 degrees. For fractals we need powers of two.
-# RAS_SIZE = 1 / width of raster pixel in degrees.
-RAS_SIZE = 256 # 100/256 km pixels
-L2D = 16 # Local : Domain detail
-D2A = 16 # Domain : Atlas detail
-NO_DATA = 32767 # GeoTIF default
-# Random heights
-SPREAD_ATLAS = 500
-SPREAD_DOMAIN = 256
-SPREAD_LOCAL = 16
+LOGGER = logging.getLogger(__name__)
 
 def get_partitions(polygons, points, pts):
     """Get partition of covered area."""
@@ -78,41 +70,13 @@ def get_partitions(polygons, points, pts):
         level += 1
     return partitions
 
-def calc_bary(pts, diam, fract):
-    """Calculate barycentric elevation in feet."""
-    # We include heuristic for fractals.  At larger distances the
-    # elevation would converge to the average.  We use that to replace
-    # the average with the fractal.  As we move into uncharted
-    # territory, fractals take over.  fract is approximately in (-1,1)
-    # and pts is ordered.
-    hdiff = max(SPREAD_ATLAS, float(pts[-1][0]) - float(pts[0][0]))
-    hd_pts = pts + [(fract * hdiff, 1/(len(pts) + 1))]
-    hsum = 0
-    dsum = 0
-    if diam > 0:
-        # There is only the mesa boundary with diameter diam.  The
-        # addition is bound by (1/2)/(1 + 1/2) = 1/3 => 333ft
-        hsum = int(hd_pts[0][0]) + 1000*(hd_pts[0][1]/diam) / (1 + (hd_pts[0][1]/diam))
-    else:
-        # SUM_i (hi/di) / SUM_j (1/dj) including fract
-        for hdj in hd_pts:
-            if float(hdj[1]) != 0:
-                dsum += 1/float(hdj[1])
-        for hdi in hd_pts:
-            if float(hdi[1]) != 0:
-                hsum += float(hdi[0]) / float(hdi[1]) / dsum
-            else:
-                hsum = float(hdi[0])
-                break
-    return hsum
-
-def handle_partitions(polygons, points, partitions, pts, fract):
+def handle_partitions(polygons, points, partitions, pts):
     """Handle all partitions for a single point."""
     # Matching is top down, thereby we don't have to evaluate holes.
     for partition in reversed(partitions):
         for pline in partition:
             sql(f"""
-              SELECT ST_Covers(wkb_geometry, ST_GeomFromText('POINT({pts[0]} {pts[1]})'))
+              SELECT ST_Covers(wkb_geometry, 'POINT({pts[0]} {pts[1]})'::geometry)
               FROM {polygons}
               WHERE id = {pline['base']}
             """)
@@ -134,107 +98,69 @@ def handle_partitions(polygons, points, partitions, pts, fract):
                     diam = float(sql()[0][0])
                 sql(f"""
                   SELECT peak.svgid,
-                    ST_Distance(ST_GeomFromText('POINT({pts[0]} {pts[1]})'), peak.wkb_geometry)
+                    ST_Distance('POINT({pts[0]} {pts[1]})'::geometry, peak.wkb_geometry)
                   FROM {points} AS peak
                   WHERE {peak_c}
                   UNION ALL
                   SELECT line.type,
                     ST_Distance(
-                      ST_GeomFromText('POINT({pts[0]} {pts[1]})'), ST_Boundary(line.wkb_geometry)
+                      'POINT({pts[0]} {pts[1]})'::geometry, ST_Boundary(line.wkb_geometry)
                     )
                   FROM {polygons} AS line
                   WHERE id = {pline['base']} OR {hole_c}
                 """)
                 sql_sorted = sorted(sql(), key=lambda x: float(x[0]))
-                ret = calc_bary(sql_sorted, diam, fract)
+                ret = calc_bary(sql_sorted, diam, ATLAS_DEV_H)
                 return ret
-    return 0
+    # Do sub-waterline minimum available
+    if len(partitions) == 0:
+        return 0
+    depth = -13200
+    for pline in partitions[0]:
+        sql(f"""
+          SELECT line.type,
+            ST_Distance(
+              'POINT({pts[0]} {pts[1]})'::geometry, ST_Boundary(line.wkb_geometry)
+            )
+          FROM {polygons} AS line
+          WHERE id = {pline['base']}
+          UNION
+          VALUES ('-13200', 1)
+        """)
+        sql_sorted = sorted(sql(), key=lambda x: float(x[0]))
+        depth = max(depth, calc_bary(sql_sorted, 0, - ATLAS_DEV_H))
+    return depth
 
 def read(raster, raster_id, geo_pts, geo_scale):
     """Check whether TIF or DB raster is available. Copy."""
     matrix_tif = read_geotiff(raster_id, 1)
-    matrix_sql = read_sqlraster(raster, raster_id, 1)
+    matrix_sql = read_sql(raster, raster_id, 1)
     if matrix_tif is None and matrix_sql is not None:
-        displace = read_sqlraster(raster, raster_id, 2)
+        displace = read_sql(raster, raster_id, 2)
         write_geotiff((matrix_sql, displace), raster_id, geo_pts, geo_scale)
     if matrix_tif is not None and matrix_sql is None:
         displace = read_geotiff(raster_id, 2)
         write_sql(raster, (matrix_tif, displace), raster_id, geo_pts, geo_scale)
     return matrix_tif is not None or matrix_sql is not None
 
-def write_sql(raster, fields, raster_id, geo_pts, geo_scale):
-    """Write the raster to Postgis."""
-    fields[0][fields[0] is None] = NO_DATA
-    fields[1][fields[1] is None] = NO_DATA
-    real_geo_scale = geo_scale * RAS_SIZE
-    sql(f"""
-      INSERT INTO {raster} (id, raster)
-      SELECT '{raster_id}',
-        ST_SetValues(
-          ST_SetValues(
-            ST_AddBand(
-              ST_AddBand(
-                ST_MakeEmptyRaster(
-                  {RAS_SIZE + 1}, {RAS_SIZE + 1},
-                  {geo_pts[0]}, {geo_pts[1]}, {1 / real_geo_scale}, {1 / real_geo_scale},
-                  0, 0
-                ),
-                '16BSI'::TEXT, {NO_DATA}, {NO_DATA}
-              ),
-              '16BSI'::TEXT, {NO_DATA}, {NO_DATA}
-            ),
-            1, 1, 1, ARRAY{numpy.array2string(fields[0], separator=",", threshold=numpy.inf)}::double precision[][]
-          ),
-          2, 1, 1, ARRAY{numpy.array2string(fields[1], separator=",", threshold=numpy.inf)}::double precision[][]
-        )
-    """)
-
-def write_geotiff(fields, raster_id, geo_pts, geo_scale):
-    """Write the raster into a GeoTIFF. Not used currently."""
-    real_geo_scale = geo_scale * RAS_SIZE
-    patch = rasterio.open(
-        f"height{raster_id}.tif", height=RAS_SIZE + 1, width=RAS_SIZE + 1,
-        driver="GTiff", count=2, nodata=NO_DATA, dtype='int16', crs=None, mode="w",
-        transform=rasterio.transform.Affine(
-            1/real_geo_scale, 0, geo_pts[0], 0, 1/real_geo_scale, geo_pts[1], 0, 0, 1
-        )
-    )
-    fields[0][fields[0] is None] = NO_DATA
-    fields[1][fields[1] is None] = NO_DATA
-    patch.write(fields[0], 1)
-    patch.write(fields[1], 2)
-
-def read_geotiff(raster_id, band):
-    """Read the raster from GeoTIFF."""
-    LOGGER.debug("Enter read %s band %s", f"height{raster_id}.tif", band)
-    if not os.path.isfile(f"height{raster_id}.tif"):
-        return None
-    patch = rasterio.open(f"height{raster_id}.tif", mode="r")
-    return numpy.asarray(patch.read(band))
-
-def read_sqlraster(raster, raster_id, band):
-    """Read the raster from Postgis."""
-    sql(f"""
-      SELECT ST_DumpValues(raster, {band})
-      FROM {raster} WHERE id = '{raster_id}'
-    """)
-    result = sql()
-    if len(result) < 1:
-        return None
-    return numpy.asarray(result[0][0])
-
 def init_displace(displace, randf=random.uniform, rseed=0):
     """Initialize the (rest of the) displacement matrix."""
     random.seed(rseed)
     if displace[0][0] == NO_DATA:
         displace[0][0] = 500 * randf(-1, 1)
-    if displace[RAS_SIZE][0] == NO_DATA:
-        displace[RAS_SIZE][0] = 500 * randf(-1, 1)
-    if displace[0][RAS_SIZE] == NO_DATA:
-        displace[0][RAS_SIZE] = 500 * randf(-1, 1)
-    if displace[RAS_SIZE][RAS_SIZE] == NO_DATA:
-        displace[RAS_SIZE][RAS_SIZE] = 500 * randf(-1, 1)
-    fractal(displace, (0, 0), (RAS_SIZE, RAS_SIZE), 250, randf)
+    if displace[RASTER_SIZE][0] == NO_DATA:
+        displace[RASTER_SIZE][0] = 500 * randf(-1, 1)
+    if displace[0][RASTER_SIZE] == NO_DATA:
+        displace[0][RASTER_SIZE] = 500 * randf(-1, 1)
+    if displace[RASTER_SIZE][RASTER_SIZE] == NO_DATA:
+        displace[RASTER_SIZE][RASTER_SIZE] = 500 * randf(-1, 1)
+    fractal(displace, (0, 0), (RASTER_SIZE, RASTER_SIZE), 250, randf)
+    maxi = -10000
+    mini = 10000
+    for i in range(0, RASTER_SIZE):
+        for j in range(0, RASTER_SIZE):
+            mini = min(displace[i][j], mini)
+            maxi = max(displace[i][j], maxi)
     return displace
 
 def seed(pts):
@@ -280,7 +206,7 @@ def fractal(height, p_0, p_1, depth, randf):
         fractal(height, p_m, p_1, depth/2, randf)
 
 def eval_delta(array, i, j):
-    """Maximum of existing array indices."""
+    """Maximum difference of existing array indices."""
     ret = 0
     for fun in (min, max):
         ret = - ret
@@ -353,7 +279,7 @@ def neighbor_id(direction: Dir, pts):
 # subdivides the unit n-1.  These are simply 'pts'.  The rasters also
 # have (local) raster coordinates that are prefixed ras.
 
-def create_raster_local(rasters, lb_a, ru_a, pt_ad):
+def local_create(rasters, lb_a, ru_a, pt_ad):
     """Iterate over all heights and create a local raster elevation field"""
     ptl_lon1 = int(lb_a[4]) if pt_ad[2] == int(lb_a[2]) else 0
     ptl_lat1 = int(lb_a[5]) if pt_ad[3] == int(lb_a[3]) else 0
@@ -361,9 +287,9 @@ def create_raster_local(rasters, lb_a, ru_a, pt_ad):
     ptl_lat2 = int(ru_a[5]) if pt_ad[3] == int(ru_a[3]) else 0
     for ptl_lon in range(ptl_lon1, ptl_lon2 + 1):
         for ptl_lat in range(ptl_lat1, ptl_lat2 + 1):
-            calc_local(rasters, [pt_ad[0], pt_ad[1], pt_ad[2], pt_ad[3], ptl_lon, ptl_lat])
+            local_frame(rasters, [pt_ad[0], pt_ad[1], pt_ad[2], pt_ad[3], ptl_lon, ptl_lat])
 
-def calc_local(rasters, pts):
+def local_frame(rasters, pts):
     """Calculate the local-level height field."""
     local_id = ".".join([str(p) for p in pts[0:6]])
     geo_pts = (
@@ -374,66 +300,65 @@ def calc_local(rasters, pts):
         LOGGER.info("Found %s", local_id)
         return
     LOGGER.info("Calculate %s", local_id)
-    displace = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    displace = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
 
     # Prepare displace from already completed squares
     left = read_geotiff(neighbor_id(Dir.LEFT, pts[0:6]), 2)
     if left is not None:
-        displace[:, 0] = left[:, RAS_SIZE]
+        displace[:, 0] = left[:, RASTER_SIZE]
     right = read_geotiff(neighbor_id(Dir.RIGHT, pts[0:6]), 2)
     if right is not None:
-        displace[:, RAS_SIZE] = right[:, 0]
+        displace[:, RASTER_SIZE] = right[:, 0]
     down = read_geotiff(neighbor_id(Dir.DOWN, pts[0:6]), 2)
     if down is not None:
-        displace[0, :] = down[RAS_SIZE, :]
+        displace[0, :] = down[RASTER_SIZE, :]
     top = read_geotiff(neighbor_id(Dir.TOP, pts[0:6]), 2)
     if top is not None:
-        displace[RAS_SIZE, :] = top[0, :]
+        displace[RASTER_SIZE, :] = top[0, :]
 
     LOGGER.debug("left %s", displace[0, :])
-    LOGGER.debug("right %s", displace[RAS_SIZE, :])
+    LOGGER.debug("right %s", displace[RASTER_SIZE, :])
     LOGGER.debug("down %s", displace[:, 0])
-    LOGGER.debug("top %s", displace[:, RAS_SIZE])
+    LOGGER.debug("top %s", displace[:, RASTER_SIZE])
 
     # Fill remainder
-    displace = init_displace(displace, seed(pts))
+    displace = init_displace(displace, rseed=seed(pts))
     LOGGER.debug("random %s", displace)
 
     domain_id = ".".join([str(p) for p in pts[0:4]])
     domain_field = read_geotiff(domain_id, 1)
-    field = calc_localfield(domain_field, pts, displace)
+    field = local_calc(domain_field, pts, displace)
     write_sql(rasters[2], (field, displace), local_id, geo_pts, L2D * D2A)
     write_geotiff((field, displace), local_id, geo_pts, L2D * D2A)
 
-def calc_localfield(domain_field, pts, displace):
+def local_calc(domain_field, pts, displace):
     """Calculate the domain height field."""
     LOGGER.info(
         "Make local raster starting at [%s,%s,%s,%s,%s,%s]",
         pts[0], pts[1], pts[2], pts[3], pts[4], pts[5]
     )
-    field = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    field = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
     geo_x = pts[0] + pts[2] / D2A + pts[4] / L2D / D2A
     ras_x = 0
-    while ras_x < RAS_SIZE + 1:
+    while ras_x < RASTER_SIZE + 1:
         LOGGER.debug("longitude at %s", geo_x)
-        ras_dx = int((geo_x - pts[0] - pts[2] / D2A) * D2A * RAS_SIZE)
-        frac_lx = (geo_x - pts[0] - pts[2] / D2A) * D2A * RAS_SIZE - ras_dx
+        ras_dx = int((geo_x - pts[0] - pts[2] / D2A) * D2A * RASTER_SIZE)
+        frac_lx = (geo_x - pts[0] - pts[2] / D2A) * D2A * RASTER_SIZE - ras_dx
         geo_y = pts[1] + pts[3] / D2A + pts[5] / L2D / D2A
         ras_y = 0
-        while ras_y < RAS_SIZE + 1:
-            ras_dy = int((geo_y - pts[1] - pts[3] / D2A) * D2A * RAS_SIZE)
-            frac_ly = (geo_y - pts[1] - pts[3] / D2A) * D2A * RAS_SIZE - ras_dy
+        while ras_y < RASTER_SIZE + 1:
+            ras_dy = int((geo_y - pts[1] - pts[3] / D2A) * D2A * RASTER_SIZE)
+            frac_ly = (geo_y - pts[1] - pts[3] / D2A) * D2A * RASTER_SIZE - ras_dy
             fract_h = displace[ras_y][ras_x] / 1000
-            delta_af = eval_delta(domain_field, ras_dy, ras_dx)
             avg = weighted_average(domain_field, (ras_dy, ras_dx), (1 - frac_ly, 1 - frac_lx))
-            field[ras_y][ras_x] = max(0, avg + fract_h * max(SPREAD_LOCAL, abs(delta_af)))
-            geo_y += 1 / RAS_SIZE / L2D / D2A
+            field[ras_y][ras_x] = avg + fract_h * LOCAL_DEV_H
+            geo_y += 1 / RASTER_SIZE / L2D / D2A
             ras_y += 1
-        geo_x += 1 / RAS_SIZE / L2D / D2A
+        geo_x += 1 / RASTER_SIZE / L2D / D2A
         ras_x += 1
     return field
 
-def create_raster_domain(rasters, lb_a, ru_a, pt_a):
+def domain_create(rasters, lb_a, ru_a, pt_a):
     """Iterate over all heights and create a domain raster elevation field"""
     ptd_lon1 = int(lb_a[2]) if pt_a[0] == int(lb_a[0]) else 0
     ptd_lat1 = int(lb_a[3]) if pt_a[1] == int(lb_a[1]) else 0
@@ -441,11 +366,11 @@ def create_raster_domain(rasters, lb_a, ru_a, pt_a):
     ptd_lat2 = int(ru_a[3]) if pt_a[1] == int(ru_a[1]) else 0
     for ptd_lon in range(ptd_lon1, ptd_lon2 + 1):
         for ptd_lat in range(ptd_lat1, ptd_lat2 + 1):
-            calc_domain(rasters, [pt_a[0], pt_a[1], ptd_lon, ptd_lat])
+            domain_frame(rasters, [pt_a[0], pt_a[1], ptd_lon, ptd_lat])
             if len(lb_a) > 4:
-                create_raster_local(rasters, lb_a, ru_a, (pt_a[0], pt_a[1], ptd_lon, ptd_lat))
+                local_create(rasters, lb_a, ru_a, (pt_a[0], pt_a[1], ptd_lon, ptd_lat))
 
-def calc_domain(rasters, pts):
+def domain_frame(rasters, pts):
     """Calculate the domain-level height field."""
     domain_id = ".".join([str(p) for p in pts[0:4]])
     geo_pts = (pts[0] + pts[2] / D2A, pts[1] + pts[3] / D2A)
@@ -453,63 +378,63 @@ def calc_domain(rasters, pts):
         LOGGER.info("Found %s", domain_id)
         return
     LOGGER.info("Calculate %s", domain_id)
-    displace = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    displace = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
 
     # Prepare displace from already completed squares
     left = read_geotiff(neighbor_id(Dir.LEFT, pts[0:4]), 2)
     if left is not None:
-        displace[:, 0] = left[:, RAS_SIZE]
+        displace[:, 0] = left[:, RASTER_SIZE]
     right = read_geotiff(neighbor_id(Dir.RIGHT, pts[0:4]), 2)
     if right is not None:
-        displace[0, RAS_SIZE] = right[:, 0]
+        displace[0, RASTER_SIZE] = right[:, 0]
     down = read_geotiff(neighbor_id(Dir.DOWN, pts[0:4]), 2)
     if down is not None:
-        displace[0, :] = down[RAS_SIZE, :]
+        displace[0, :] = down[RASTER_SIZE, :]
     top = read_geotiff(neighbor_id(Dir.TOP, pts[0:4]), 2)
     if top is not None:
-        displace[RAS_SIZE, :] = top[0, :]
+        displace[RASTER_SIZE, :] = top[0, :]
 
     LOGGER.debug("left %s", displace[0, :])
-    LOGGER.debug("right %s", displace[RAS_SIZE, :])
+    LOGGER.debug("right %s", displace[RASTER_SIZE, :])
     LOGGER.debug("down %s", displace[:, 0])
-    LOGGER.debug("top %s", displace[:, RAS_SIZE])
+    LOGGER.debug("top %s", displace[:, RASTER_SIZE])
 
     # Fill remainder
-    displace = init_displace(displace, seed(pts))
+    displace = init_displace(displace, rseed=seed(pts))
     LOGGER.debug("random %s", displace)
 
     atlas_id = ".".join([str(p) for p in pts[0:2]])
     atlas_field = read_geotiff(atlas_id, 1)
-    field = calc_domainfield(atlas_field, pts, displace)
+    field = domain_calc(atlas_field, pts, displace)
     write_sql(rasters[1], (field, displace), domain_id, geo_pts, D2A)
     write_geotiff((field, displace), domain_id, geo_pts, D2A)
 
-def calc_domainfield(atlas_field, pts, displace):
+def domain_calc(atlas_field, pts, displace):
     """Calculate the domain height field."""
     LOGGER.info("Make domain raster for [%s,%s,%s,%s]", pts[0], pts[1], pts[2], pts[3])
-    field = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    field = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
     geo_x = pts[0] + pts[2] / D2A
     ras_x = 0
-    while ras_x < RAS_SIZE + 1:
+    while ras_x < RASTER_SIZE + 1:
         LOGGER.debug("longitude at %s", geo_x)
-        ras_ax = int((geo_x - pts[0]) * RAS_SIZE)
-        frac_dx = (geo_x - pts[0]) * RAS_SIZE - ras_ax
+        ras_ax = int((geo_x - pts[0]) * RASTER_SIZE)
+        frac_dx = (geo_x - pts[0]) * RASTER_SIZE - ras_ax
         geo_y = pts[1] + pts[3] / D2A
         ras_y = 0
-        while ras_y < RAS_SIZE + 1:
-            ras_ay = int((geo_y - pts[1]) * RAS_SIZE)
-            frac_dy = (geo_y - pts[1]) * RAS_SIZE - ras_ay
+        while ras_y < RASTER_SIZE + 1:
+            LOGGER.debug("latitude at %s", geo_y)
+            ras_ay = int((geo_y - pts[1]) * RASTER_SIZE)
+            frac_dy = (geo_y - pts[1]) * RASTER_SIZE - ras_ay
             fract_h = displace[ras_y][ras_x] / 1000
-            delta_af = eval_delta(atlas_field, ras_ay, ras_ax)
             avg = weighted_average(atlas_field, (ras_ay, ras_ax), (1 - frac_dy, 1 - frac_dx))
-            field[ras_y][ras_x] = max(0, avg + fract_h * max(SPREAD_DOMAIN, abs(delta_af)))
-            geo_y += 1 / RAS_SIZE / D2A
+            field[ras_y][ras_x] = avg + fract_h * DOMAIN_DEV_H
+            geo_y += 1 / RASTER_SIZE / D2A
             ras_y += 1
-        geo_x += 1 / RAS_SIZE / D2A
+        geo_x += 1 / RASTER_SIZE / D2A
         ras_x += 1
     return field
 
-def create_raster_atlas(polygons, points, rasters, lb_a, ru_a):
+def atlas_create(polygons, points, rasters, lb_a, ru_a):
     """Iterate over all heights and create an atlas raster elevation field"""
     if len(lb_a) == 2:
         level = "atlas"
@@ -524,11 +449,11 @@ def create_raster_atlas(polygons, points, rasters, lb_a, ru_a):
     ru_a[0] = (ru_a[0] + 180) % 360 - 180
     for pta_lon in range(int(lb_a[0]), int(ru_a[0]) + 1):
         for pta_lat in range(int(lb_a[1]), int(ru_a[1]) + 1):
-            calc_atlas(rasters, polygons, points, (pta_lon, pta_lat))
+            atlas_frame(rasters, polygons, points, (pta_lon, pta_lat))
             if len(lb_a) > 2:
-                create_raster_domain(rasters, lb_a, ru_a, (pta_lon, pta_lat))
+                domain_create(rasters, lb_a, ru_a, (pta_lon, pta_lat))
 
-def calc_atlas(rasters, polygons, points, pts):
+def atlas_frame(rasters, polygons, points, pts):
     """Calculate the atlas-level height field."""
     atlas_id = ".".join([str(p) for p in pts[0:2]])
     geo_pts = (pts[0], pts[1])
@@ -536,63 +461,58 @@ def calc_atlas(rasters, polygons, points, pts):
         LOGGER.info("Found %s", atlas_id)
         return
     LOGGER.info("Calculate %s", atlas_id)
-    displace = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    displace = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
 
     # Prepare displace from already completed squares
     left = read_geotiff(neighbor_id(Dir.LEFT, pts[0:2]), 2)
     if left is not None:
-        displace[:, 0] = left[:, RAS_SIZE]
+        displace[:, 0] = left[:, RASTER_SIZE]
     right = read_geotiff(neighbor_id(Dir.RIGHT, pts[0:2]), 2)
     if right is not None:
-        displace[:, RAS_SIZE] = right[:, 0]
+        displace[:, RASTER_SIZE] = right[:, 0]
     down = read_geotiff(neighbor_id(Dir.DOWN, pts[0:2]), 2)
     if down is not None:
-        displace[0, :] = down[RAS_SIZE, :]
+        displace[0, :] = down[RASTER_SIZE, :]
     top = read_geotiff(neighbor_id(Dir.TOP, pts[0:2]), 2)
     if top is not None:
-        displace[RAS_SIZE, :] = top[0, :]
+        displace[RASTER_SIZE, :] = top[0, :]
 
     LOGGER.debug("left %s", displace[0, :])
-    LOGGER.debug("right %s", displace[RAS_SIZE, :])
+    LOGGER.debug("right %s", displace[RASTER_SIZE, :])
     LOGGER.debug("down %s", displace[:, 0])
-    LOGGER.debug("top %s", displace[:, RAS_SIZE])
+    LOGGER.debug("top %s", displace[:, RASTER_SIZE])
 
     # Fill remainder
-    displace = init_displace(displace, seed(pts))
+    displace = init_displace(displace, rseed=seed(pts))
     LOGGER.debug("random %s", displace)
 
-    field = calc_atlasfield(polygons, points, pts, displace)
+    field = atlas_calc(polygons, points, pts, displace)
     write_sql(rasters[0], (field, displace), atlas_id, geo_pts, 1)
     write_geotiff((field, displace), atlas_id, geo_pts, 1)
 
-def calc_atlasfield(polygons, points, pts, displace):
+def atlas_calc(polygons, points, pts, displace):
     """Calculate the atlas height field."""
     partitions = get_partitions(polygons, points, [pts[0], pts[1], pts[0] + 1, pts[1] + 1])
-    field = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    field = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
     LOGGER.info("Make atlas raster for [%s,%s]", pts[0], pts[1])
     geo_x = pts[0]
     ras_x = 0
-    while ras_x < RAS_SIZE:
+    while ras_x < RASTER_SIZE:
         LOGGER.debug("longitude at %s", geo_x)
         geo_y = pts[1]
         ras_y = 0
-        while ras_y < RAS_SIZE:
-            fract = displace[ras_y][ras_x] / 1000
-            field[ras_y][ras_x] = max(
-                0,
-                handle_partitions(
-                    polygons, points, partitions, [geo_x, geo_y], fract
-                )
-            )
-            geo_y += 1 / RAS_SIZE
+        while ras_y < RASTER_SIZE:
+            fract_h = displace[ras_y][ras_x] / 1000
+            avg = handle_partitions(polygons, points, partitions, [geo_x, geo_y])
+            field[ras_y][ras_x] = avg + fract_h * ATLAS_DEV_H
+            geo_y += 1 / RASTER_SIZE
             ras_y += 1
-        geo_x += 1 / RAS_SIZE
+        geo_x += 1 / RASTER_SIZE
         ras_x += 1
     return field
 
 def main(inpre, outpre, lb_a, ru_a):
     """Main method."""
-
     rasters = [f"{outpre}_atlas_rasters", f"{outpre}_domain_rasters", f"{outpre}_local_rasters"]
     polygons = f"{inpre}_polygons"
     points = f"{inpre}_points"
@@ -605,7 +525,7 @@ def main(inpre, outpre, lb_a, ru_a):
     ext2pres.CONNECT.commit()
     # Constraints? SELECT AddRasterConstraints('{raster}'::name, 'raster'::name, ...);
 
-    create_raster_atlas(polygons, points, rasters, lb_a, ru_a)
+    atlas_create(polygons, points, rasters, lb_a, ru_a)
 
 def tests():
     """Tests."""
@@ -619,6 +539,7 @@ def tests():
     interpolation_tests3()
     side_tests1()
     side_tests2()
+    calc_bary_test()
 
 def seed_tests():
     """Test different seeds at lowest level."""
@@ -667,32 +588,32 @@ def fractal_tests():
     num_tests = 0
 
     num_tests += 1
-    field = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    field = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
     field = init_displace(field, lambda x, y: x)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert (field[i][j] >= -1164.0625 and field[i][j] <= 1164.0625)
     assert any([
         field[i][j] > 1160 or field[i][j] < -1160
-        for i in range(0, RAS_SIZE + 1) for j in range(0, RAS_SIZE + 1)
+        for i in range(0, RASTER_SIZE + 1) for j in range(0, RASTER_SIZE + 1)
     ])
 
     num_tests += 1
-    field = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    field = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
     field = init_displace(field, lambda x, y: y)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert (field[i][j] >= -1164.0625 and field[i][j] <= 1164.0625)
     assert any([
         field[i][j] > 1160 or field[i][j] < -1160
-        for i in range(0, RAS_SIZE + 1) for j in range(0, RAS_SIZE + 1)
+        for i in range(0, RASTER_SIZE + 1) for j in range(0, RASTER_SIZE + 1)
     ])
 
     num_tests += 1
-    field = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), NO_DATA, numpy.float32)
+    field = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), NO_DATA, numpy.float32)
     field = init_displace(field, lambda x, y: 0)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert field[i][j] == 0
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
@@ -796,173 +717,197 @@ def neighbor_tests3():
 
 def interpolation_tests1():
     """Interpolation on domain level."""
-    displace = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    displace = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     num_tests = 0
 
     # i domain
     num_tests += 1
-    atlas = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    atlas = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             atlas[j, i] = i
-    domain = calc_domainfield(atlas, (0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    domain = domain_calc(atlas, (0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(domain[j][i], i/16)
 
     # j domain
     num_tests += 1
-    atlas = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    atlas = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             atlas[j, i] = j
-    domain = calc_domainfield(atlas, (0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    domain = domain_calc(atlas, (0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(domain[j][i], j/16)
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
 
 def interpolation_tests2():
     """Interpolation on domain and local level."""
-    displace = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    displace = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     num_tests = 0
 
     # i*j domain
     num_tests += 1
-    atlas = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    atlas = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             atlas[j, i] = i*j
-    domain = calc_domainfield(atlas, (0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    domain = domain_calc(atlas, (0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(domain[j][i], i/16 * j/16)
 
     # i + j local
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             domain[j, i] = j+i
-    local = calc_localfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    local = local_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(local[j][i], i/16 + j/16)
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
 
 def interpolation_tests3():
     """Interpolation on local level."""
-    displace = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    displace = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     num_tests = 0
 
     # i local
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             domain[j, i] = i
-    local = calc_localfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    local = local_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(local[j][i], i/16)
 
     # j local
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             domain[j, i] = j
-    local = calc_localfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    local = local_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(local[j][i], j/16)
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
 
 def side_tests1():
     """Neighbor effects."""
-    displace = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    displace = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     num_tests = 0
 
     # left local
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     domain[0, :] = 1
-    local = calc_localfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    local = local_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(local[j][i], max(0, 1 - j/16))
 
     # right local
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    domain[RAS_SIZE, :] = 1
-    local = calc_localfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
-            assert math.isclose(local[j][i], max(0, j/16 - RAS_SIZE + 16))
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    domain[RASTER_SIZE, :] = 1
+    local = local_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
+            assert math.isclose(local[j][i], max(0, j/16 - RASTER_SIZE + 16))
 
     #  down local
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     domain[:, 0] = 1
-    local = calc_localfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    local = local_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(local[j][i], max(0, 1 - i/16))
 
     #  top local
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    domain[:, RAS_SIZE] = 1
-    local = calc_localfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
-            assert math.isclose(local[j][i], max(0, i/16 - RAS_SIZE + 16))
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    domain[:, RASTER_SIZE] = 1
+    local = local_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
+            assert math.isclose(local[j][i], max(0, i/16 - RASTER_SIZE + 16))
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
 
 def side_tests2():
     """Neighbor effects."""
-    displace = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    displace = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     num_tests = 0
 
     # left domain
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     domain[0, :] = 1
-    domain = calc_domainfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    domain = domain_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(domain[j][i], max(0, 1 - j/16))
 
     # right domain
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    domain[RAS_SIZE, :] = 1
-    domain = calc_domainfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
-            assert math.isclose(domain[j][i], max(0, j/16 - RAS_SIZE + 16))
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    domain[RASTER_SIZE, :] = 1
+    domain = domain_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
+            assert math.isclose(domain[j][i], max(0, j/16 - RASTER_SIZE + 16))
 
     #  down domain
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
     domain[:, 0] = 1
-    domain = calc_domainfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
+    domain = domain_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
             assert math.isclose(domain[j][i], max(0, 1 - i/16))
 
     #  top domain
     num_tests += 1
-    domain = numpy.full((RAS_SIZE + 1, RAS_SIZE + 1), 0, numpy.float32)
-    domain[:, RAS_SIZE] = 1
-    domain = calc_domainfield(domain, (0, 0, 0, 0, 0, 0), displace)
-    for i in range(0, RAS_SIZE + 1):
-        for j in range(0, RAS_SIZE + 1):
-            assert math.isclose(domain[j][i], max(0, i/16 - RAS_SIZE + 16))
+    domain = numpy.full((RASTER_SIZE + 1, RASTER_SIZE + 1), 0, numpy.float32)
+    domain[:, RASTER_SIZE] = 1
+    domain = domain_calc(domain, (0, 0, 0, 0, 0, 0), displace)
+    for i in range(0, RASTER_SIZE + 1):
+        for j in range(0, RASTER_SIZE + 1):
+            assert math.isclose(domain[j][i], max(0, i/16 - RASTER_SIZE + 16))
+
+    print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")
+
+def calc_bary_test():
+    """Check that barymetric height yields correct values."""
+    num_tests = 0
+
+    num_tests += 1
+    assert calc_bary([['1000', 1], ['500', 1]], 0, 0) == 750
+    num_tests += 1
+    assert calc_bary([['1000', 1], ['500', 1]], 0, 1000) == 750
+    assert calc_bary([['1000', 1], ['500', 1]], 0, -1000) == 750
+    num_tests += 1
+    assert calc_bary([['1000', 2], ['500', 2]], 0, 1000) == 750
+    assert calc_bary([['1000', 2], ['500', 2]], 0, -1000) == 750
+    num_tests += 1
+    assert calc_bary([['1000', 1]], 2, 100) == 1000 + 100/3
+    assert calc_bary([['1000', 1]], 2, -100) == 1000 - 100/3
+    num_tests += 1
+    assert calc_bary([['1000', 1]], 1, 1000) == 1500
+    assert calc_bary([['1000', 1]], 1, -1000) == 500
+    num_tests += 1
+    assert calc_bary([['1000', 1]], 2, 1000) == 1000 + 1000/3
+    assert calc_bary([['1000', 1]], 2, -1000) == 1000 - 1000/3
 
     print(f"> {inspect.stack()[0][3]}: {num_tests} tests passed")

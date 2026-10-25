@@ -76,12 +76,12 @@ Extraction list entries are lower case and white space is not allowed
 between entries.
 
     python raw2ext -i raw -e contours,names,coast,lakes,roads,flora,rivers
-    python raw2ext -i rawl -e abc -s local
+    python raw2ext -i rawl -e Cherafir -s local
 
-If you use `-s local` the `-e` switch is ignored.  It currently
-extracts houses, towers, and contours.  A few artifacts (e.g. the
-legend) are thrown away.  It is "hard-coded" towards the current
-Cherafir SVG.
+If you use `-s local` the `-e` switch is currently ignored.  It
+currently extracts houses, towers, and contours.  A few artifacts
+(e.g. the legend) are thrown away.  It is "hard-coded" towards the
+current Cherafir SVG.
 
 #### Contours
 
@@ -216,7 +216,8 @@ because passing a leading '-' as argument is hard.
 A typical area specification: `-16.40.0.0,-16.40.15.15`
 
 The whole procedure takes a while, and since Melderyn is the only
-completed relevant isle, these are some reasonable calls:
+completed relevant body, these are some reasonable calls:
 
     python ext2pres -i raw -o pres -A 343.40,344.41
-    python ext2pres -i raw -o pres -A 344.40.2.6.9.5,344.40.2.6.11.7
+    python ext2pres -i raw -o pres -A 344.40.2.6.8.2,344.40.2.6.12.7
+    python ext2pres -i raw -o pres -s Cherafir
